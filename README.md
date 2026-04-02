@@ -193,16 +193,10 @@ Used to preserve compatibility with previous tool names.
 
 ```text
 ce_plugin/
-doc_ce_dll/
 README.md
 README.zh-CN.md
 LICENSE
 ```
-
-## Docs
-
-- Plugin architecture and rollout docs: [doc_ce_dll/README.md](./doc_ce_dll/README.md)
-- Current capability/parity tracker: [doc_ce_dll/PARITY_STATUS.md](./doc_ce_dll/PARITY_STATUS.md)
 
 ## License
 

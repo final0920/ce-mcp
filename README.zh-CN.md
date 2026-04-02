@@ -193,16 +193,10 @@ ce_plugin/target/release/ce_plugin.dll
 
 ```text
 ce_plugin/
-doc_ce_dll/
 README.md
 README.zh-CN.md
 LICENSE
 ```
-
-## 文档
-
-- 插件架构与说明：`doc_ce_dll/README.md`
-- 当前能力与对齐状态：`doc_ce_dll/PARITY_STATUS.md`
 
 ## 许可证
 
