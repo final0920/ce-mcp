@@ -1,0 +1,209 @@
+# Cheat Engine MCP Plugin
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#requirements)
+[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org)
+
+Native Cheat Engine plugin that exposes a local MCP-compatible HTTP endpoint for AI agents and operator-driven reverse engineering workflows.
+
+**Language**: [English](./README.md) | [简体中文](./README.zh-CN.md)
+
+## Fork Notice
+
+- This repository is derived from `miscusi-peek/cheatengine-mcp-bridge`.
+- Original project license: MIT.
+- Original copyright notice: `Copyright (c) 2025 miscusi-peek`.
+
+## Overview
+
+This project turns Cheat Engine into a local MCP tool host.
+
+Instead of asking an AI model to reason blindly about a target process, the model can call structured tools through MCP and collaborate with Cheat Engine as an actual reversing backend:
+
+- inspect modules, threads, and memory regions
+- read and write process memory
+- resolve pointer chains and scan patterns
+- disassemble code and analyze references
+- place breakpoints and collect hit data
+- run Lua and Auto Assembler scripts inside CE
+
+The result is a practical workflow where:
+
+- Cheat Engine remains the live debugger and memory-analysis engine
+- the MCP client provides transport and tool invocation
+- the model handles hypothesis generation, planning, correlation, and iterative reverse-engineering tasks
+
+## Reverse Engineering Workflow
+
+Typical AI-assisted workflow with this plugin:
+
+1. Load the plugin in Cheat Engine and attach the target process.
+2. Confirm `/health` and `ping` are healthy.
+3. Let the model inspect modules, memory regions, symbols, and threads.
+4. Use scan, pointer, and memory tools to locate runtime data.
+5. Use disassembly and reference tools to map code paths and calling relationships.
+6. Use breakpoints or DBVM watch to observe runtime behavior.
+7. Use Lua or Auto Assembler to validate patches, hooks, and automation logic.
+
+This is designed for dynamic analysis, game reversing, runtime inspection, memory tooling, and operator-guided debugging sessions.
+
+## Quick Start
+
+### 1. Build
+
+```powershell
+cd ce_plugin
+cargo build --release
+```
+
+Output DLL:
+
+```text
+ce_plugin/target/release/ce_plugin.dll
+```
+
+### 2. Load in Cheat Engine
+
+1. Open Cheat Engine.
+2. Load `ce_plugin.dll` as a plugin.
+3. Attach a target process.
+4. Confirm the plugin console shows runtime status.
+
+### 3. Connect MCP Client
+
+- Health endpoint: `GET http://127.0.0.1:18765/health`
+- MCP endpoint: `POST http://127.0.0.1:18765/mcp`
+
+The exact client config depends on whether the MCP client supports HTTP or Streamable HTTP transport.
+
+## Runtime Notes
+
+- `dispatcher_mode = window-message-hook` means CE main-window dispatch hook is active.
+- `script_runtime_ready = true` means script-sensitive tools are available.
+- If the hook cannot be installed, the plugin falls back to `serialized-worker`.
+- In fallback mode, native Rust tools still work, but script, breakpoint, and DBVM tools are limited.
+
+## Tool Surface
+
+The tool surface is organized around the normal stages of dynamic reverse engineering.
+
+### Process & Symbols
+
+Used to establish context before analysis starts.
+
+- `ping`: Health probe for plugin liveness, dispatcher mode, and script runtime state.
+- `get_process_info`: Returns the currently attached process summary, architecture, and loaded module count.
+- `enum_modules`: Lists loaded modules with base addresses, sizes, and paths.
+- `get_thread_list`: Enumerates target-process threads for runtime inspection.
+- `get_symbol_address`: Resolves a symbol or module expression into an address.
+- `get_address_info`: Resolves an address back into module-relative metadata.
+- `get_rtti_classname`: Attempts RTTI-based class name recovery from an object address.
+
+### Memory Read/Write
+
+Used to confirm data layouts, runtime state, object fields, and patch candidates.
+
+- `read_memory`: Reads raw bytes from process memory.
+- `read_integer`: Reads numeric values such as `byte`, `word`, `dword`, `qword`, `float`, and `double`.
+- `read_string`: Reads ANSI or UTF-16 strings from memory.
+- `read_pointer`: Reads a pointer value and can continue through offsets when provided.
+- `read_pointer_chain`: Resolves a multi-level pointer chain and reports the traversal path.
+- `write_memory`: Writes raw bytes into process memory.
+- `write_integer`: Writes numeric values into memory.
+- `write_string`: Writes ANSI or UTF-16 strings into memory.
+
+### Scan & Search
+
+Used to find candidate values, signatures, regions, and runtime anchors.
+
+- `scan_all`: Starts an initial value scan and creates a scan session.
+- `get_scan_results`: Returns the current scan result set.
+- `next_scan`: Refines the previous scan result set.
+- `aob_scan`: Searches memory for an AOB signature.
+- `search_string`: Searches readable memory for text strings.
+- `generate_signature`: Builds a signature candidate around a target address.
+- `get_memory_regions`: Returns commonly useful committed memory regions.
+- `enum_memory_regions_full`: Enumerates the full memory map.
+- `checksum_memory`: Computes an MD5 checksum for a memory region.
+
+### Analysis
+
+Used to move from raw addresses to code structure and behavioral understanding.
+
+- `disassemble`: Disassembles instructions from a target address range.
+- `get_instruction_info`: Decodes a single instruction with detailed metadata.
+- `find_function_boundaries`: Heuristically locates function start and end boundaries.
+- `analyze_function`: Extracts call relationships from a function body.
+- `find_references`: Finds instructions that reference a target address.
+- `find_call_references`: Finds call sites that target a function address.
+- `dissect_structure`: Heuristically infers object or structure field layout from memory.
+
+### Debug / DBVM
+
+Used to observe behavior instead of inferring it statically.
+
+- `set_breakpoint`: Sets an execution hardware breakpoint.
+- `set_data_breakpoint`: Sets a data-access or write breakpoint.
+- `remove_breakpoint`: Removes a breakpoint by id.
+- `list_breakpoints`: Lists active breakpoints.
+- `clear_all_breakpoints`: Clears all active breakpoints.
+- `get_breakpoint_hits`: Returns captured breakpoint-hit records and optional history clearing.
+- `get_physical_address`: Translates a virtual address to a physical address.
+- `start_dbvm_watch`: Starts a DBVM watch tracing session.
+- `poll_dbvm_watch`: Polls intermediate DBVM watch results without stopping the session.
+- `stop_dbvm_watch`: Stops a DBVM watch session and returns final results.
+
+### Script
+
+Used to automate CE-side logic, validate ideas quickly, and apply patches during analysis.
+
+- `evaluate_lua`: Executes a Lua snippet inside Cheat Engine.
+- `evaluate_lua_file`: Executes a local Lua file inside Cheat Engine.
+- `auto_assemble`: Executes an Auto Assembler script.
+- `auto_assemble_file`: Executes a local Auto Assembler script file.
+
+### Compatibility Aliases
+
+Used to preserve compatibility with previous tool names.
+
+- `read_bytes`: Alias for `read_memory`.
+- `pattern_scan`: Alias for `aob_scan`.
+- `set_execution_breakpoint`: Alias for `set_breakpoint`.
+- `set_write_breakpoint`: Alias for `set_data_breakpoint`.
+- `find_what_writes_safe`: Alias for `start_dbvm_watch` in write-trace mode.
+- `find_what_accesses_safe`: Alias for `start_dbvm_watch` in access-trace mode.
+- `get_watch_results`: Alias for `stop_dbvm_watch`.
+
+## Requirements
+
+- Windows
+- Cheat Engine `7.5 x64` or `7.6 x64`
+- Rust toolchain for local builds
+
+## Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `CE_PLUGIN_BIND_ADDR` | Plugin HTTP bind address. | `127.0.0.1:18765` |
+| `CE_PLUGIN_DISPATCH_TIMEOUT_MS` | Main-thread dispatch timeout. | `15000` |
+| `CE_PLUGIN_CONSOLE_LOG` | Set `0` to disable console logging. | enabled |
+| `CE_PLUGIN_CONSOLE_TITLE` | Console window title. | `流云MCP插件` |
+
+## Project Layout
+
+```text
+ce_plugin/
+doc_ce_dll/
+README.md
+README.zh-CN.md
+LICENSE
+```
+
+## Docs
+
+- Plugin architecture and rollout docs: [doc_ce_dll/README.md](./doc_ce_dll/README.md)
+- Current capability/parity tracker: [doc_ce_dll/PARITY_STATUS.md](./doc_ce_dll/PARITY_STATUS.md)
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

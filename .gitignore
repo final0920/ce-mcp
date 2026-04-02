@@ -1,0 +1,9 @@
+.idea/
+doc/
+AGENTS.md
+project_skill/
+AI_Context/
+node_mcp/node_modules/
+node_mcp/dist/
+ce_plugin/target/
+doc_ce_dll/
