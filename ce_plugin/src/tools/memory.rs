@@ -2,7 +2,7 @@ use core::ffi::c_void;
 
 use serde_json::{json, Value};
 
-use super::{util, ToolResponse};
+use super::{addressing, util, ToolResponse};
 use crate::runtime;
 
 const METHODS: &[&str] = &[
@@ -57,6 +57,7 @@ fn read_memory(params_json: &str) -> ToolResponse {
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(256)
         .min(65_536);
+    let modules = current_modules();
 
     match runtime::read_process_memory(handle, address, size) {
         Ok(bytes) => {
@@ -70,6 +71,7 @@ fn read_memory(params_json: &str) -> ToolResponse {
                 body_json: json!({
                     "success": true,
                     "address": util::format_address(address),
+                    "normalized_address": normalize_address(address, &modules),
                     "size": bytes.len(),
                     "data": hex,
                     "bytes": bytes,
@@ -99,12 +101,14 @@ fn read_integer(params_json: &str) -> ToolResponse {
         Ok(address) => address,
         Err(error) => return error_response(error),
     };
+    let modules = current_modules();
 
     let result = match integer_type {
         "byte" => read_scalar::<1, u8>(handle, address).map(|value| {
             json!({
                 "success": true,
                 "address": util::format_address(address),
+                "normalized_address": normalize_address(address, &modules),
                 "value": value,
                 "type": "byte",
                 "hex": format!("0x{:02X}", value),
@@ -114,6 +118,7 @@ fn read_integer(params_json: &str) -> ToolResponse {
             json!({
                 "success": true,
                 "address": util::format_address(address),
+                "normalized_address": normalize_address(address, &modules),
                 "value": value,
                 "type": "word",
                 "hex": format!("0x{:04X}", value),
@@ -123,6 +128,7 @@ fn read_integer(params_json: &str) -> ToolResponse {
             json!({
                 "success": true,
                 "address": util::format_address(address),
+                "normalized_address": normalize_address(address, &modules),
                 "value": value,
                 "type": "dword",
                 "hex": format!("0x{:08X}", value),
@@ -132,6 +138,7 @@ fn read_integer(params_json: &str) -> ToolResponse {
             json!({
                 "success": true,
                 "address": util::format_address(address),
+                "normalized_address": normalize_address(address, &modules),
                 "value": value,
                 "type": "qword",
                 "hex": format!("0x{:016X}", value),
@@ -142,6 +149,7 @@ fn read_integer(params_json: &str) -> ToolResponse {
             json!({
                 "success": true,
                 "address": util::format_address(address),
+                "normalized_address": normalize_address(address, &modules),
                 "value": value,
                 "type": "float",
                 "hex": format!("0x{:08X}", value.to_bits()),
@@ -152,6 +160,7 @@ fn read_integer(params_json: &str) -> ToolResponse {
             json!({
                 "success": true,
                 "address": util::format_address(address),
+                "normalized_address": normalize_address(address, &modules),
                 "value": value,
                 "type": "double",
                 "hex": format!("0x{:016X}", value.to_bits()),
@@ -189,6 +198,7 @@ fn read_string(params_json: &str) -> ToolResponse {
         .unwrap_or(256)
         .min(4096);
     let wide = params.get("wide").and_then(Value::as_bool).unwrap_or(false);
+    let modules = current_modules();
 
     let bytes_to_read = if wide {
         max_length.saturating_mul(2)
@@ -221,6 +231,7 @@ fn read_string(params_json: &str) -> ToolResponse {
         body_json: json!({
             "success": true,
             "address": util::format_address(address),
+            "normalized_address": normalize_address(address, &modules),
             "value": value,
             "wide": wide,
             "max_length": max_length,
@@ -251,6 +262,7 @@ fn read_pointer(params_json: &str) -> ToolResponse {
         Ok(address) => address,
         Err(error) => return error_response(error),
     };
+    let modules = current_modules();
 
     match read_scalar::<8, u64>(handle, address) {
         Ok(value) => ToolResponse {
@@ -258,8 +270,10 @@ fn read_pointer(params_json: &str) -> ToolResponse {
             body_json: json!({
                 "success": true,
                 "address": util::format_address(address),
+                "normalized_address": normalize_address(address, &modules),
                 "value": value,
                 "hex": format!("0x{:016X}", value),
+                "value_normalized": normalize_pointer_value(value, &modules),
             })
             .to_string(),
         },
@@ -280,15 +294,18 @@ fn read_pointer_chain(params_json: &str) -> ToolResponse {
         Ok(address) => address,
         Err(error) => return error_response(error),
     };
+    let base_address = current;
     let offsets = params
         .get("offsets")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let modules = current_modules();
 
     let mut path = vec![json!({
         "step": 0,
         "address": util::format_address(current),
+        "normalized_address": normalize_address(current, &modules),
         "offset": 0,
     })];
 
@@ -302,19 +319,21 @@ fn read_pointer_chain(params_json: &str) -> ToolResponse {
         };
 
         let pointer = match read_scalar::<8, u64>(handle, current) {
-            Ok(value) => value as i64,
+            Ok(value) => value,
             Err(error) => return error_response(error),
         };
-        let next = pointer.saturating_add(offset);
+        let next = (pointer as i64).saturating_add(offset);
         if next < 0 {
             return error_response("pointer chain resolved to negative address".to_owned());
         }
         current = next as usize;
         path.push(json!({
             "step": index + 1,
-            "pointer": format!("0x{:016X}", pointer as u64),
+            "pointer": format!("0x{:016X}", pointer),
+            "pointer_normalized": normalize_pointer_value(pointer, &modules),
             "offset": offset,
             "address": util::format_address(current),
+            "normalized_address": normalize_address(current, &modules),
         }));
     }
 
@@ -322,7 +341,10 @@ fn read_pointer_chain(params_json: &str) -> ToolResponse {
         success: true,
         body_json: json!({
             "success": true,
+            "base_address": util::format_address(base_address),
+            "base_normalized_address": normalize_address(base_address, &modules),
             "final_address": util::format_address(current),
+            "final_address_normalized": normalize_address(current, &modules),
             "final_value": format!("0x{:016X}", current as u64),
             "path": path,
         })
@@ -464,6 +486,35 @@ fn write_string(params_json: &str) -> ToolResponse {
 
 fn opened_process_handle() -> Option<*mut c_void> {
     runtime::app_state().and_then(|app| app.opened_process_handle())
+}
+
+fn current_modules() -> Vec<runtime::ModuleInfo> {
+    let Some(app) = runtime::app_state() else {
+        return Vec::new();
+    };
+
+    let process_id = app.opened_process_id().unwrap_or(0);
+    if process_id == 0 {
+        return Vec::new();
+    }
+
+    runtime::enum_modules(process_id).unwrap_or_default()
+}
+
+fn normalize_address(
+    address: usize,
+    modules: &[runtime::ModuleInfo],
+) -> Option<crate::domain::address::AddressRef> {
+    addressing::normalize_address_from_modules(address, modules)
+}
+
+fn normalize_pointer_value(
+    value: u64,
+    modules: &[runtime::ModuleInfo],
+) -> Option<crate::domain::address::AddressRef> {
+    usize::try_from(value)
+        .ok()
+        .and_then(|address| normalize_address(address, modules))
 }
 
 fn runtime_unavailable(message: &str) -> ToolResponse {

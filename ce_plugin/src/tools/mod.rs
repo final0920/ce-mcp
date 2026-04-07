@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 
+mod addressing;
 mod alias;
 mod analysis;
+mod batch;
 mod debug;
+mod fingerprint;
 mod memory;
 mod process;
 mod scan;
@@ -42,6 +45,8 @@ pub fn requires_serialized_dispatch(method: &str) -> bool {
         canonical,
         "get_symbol_address"
             | "get_address_info"
+            | "batch_get_address_info"
+            | "batch_disassemble"
             | "get_rtti_classname"
             | "disassemble"
             | "get_instruction_info"
@@ -71,7 +76,13 @@ fn dispatch_canonical(method: &str, params_json: &str) -> ToolResponse {
     if let Some(response) = process::dispatch(method, params_json) {
         return response;
     }
+    if let Some(response) = fingerprint::dispatch(method, params_json) {
+        return response;
+    }
     if let Some(response) = memory::dispatch(method, params_json) {
+        return response;
+    }
+    if let Some(response) = batch::dispatch(method, params_json) {
         return response;
     }
     if let Some(response) = scan::dispatch(method, params_json) {

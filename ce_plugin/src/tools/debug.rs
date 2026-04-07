@@ -1,6 +1,11 @@
-use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
-use super::{script, util, ToolResponse};
+use serde_json::{json, Map, Value};
+
+use super::{addressing, script, util, ToolResponse};
+use crate::domain::context::RequestContext;
+use crate::domain::evidence::{EvidenceRecord, EvidenceType};
+use crate::runtime;
 
 const METHODS: &[&str] = &[
     "set_breakpoint",
@@ -564,6 +569,7 @@ fn get_breakpoint_hits(params_json: &str) -> ToolResponse {
         Ok(value) => value,
         Err(error) => return error_response(error),
     };
+    let ctx = util::parse_request_context(&params);
 
     let breakpoint_id = match parse_optional_id(params.get("id")) {
         Ok(id) => id,
@@ -606,7 +612,7 @@ return {{
         lua_bool(clear),
     );
 
-    execute_debug_snippet(code.as_str())
+    enrich_breakpoint_hits_response(execute_debug_snippet(code.as_str()), &ctx)
 }
 
 fn get_physical_address(params_json: &str) -> ToolResponse {
@@ -656,6 +662,7 @@ fn start_dbvm_watch(params_json: &str) -> ToolResponse {
         Ok(value) => value,
         Err(error) => return error_response(error),
     };
+    let ctx = util::parse_request_context(&params);
 
     let address = match util::parse_address(params.get("address")) {
         Ok(address) => address,
@@ -760,11 +767,12 @@ if not watchId then
   }}
 end
 
+local startedAt = os.time()
 watches[watchKey] = {{
   id = watchId,
   physical = phys,
   mode = mode,
-  start_time = os.time()
+  start_time = startedAt
 }}
 
 return {{
@@ -774,13 +782,14 @@ return {{
   physical_address = string.format("0x%X", phys),
   watch_id = watchId,
   mode = mode,
+  started_at = startedAt,
   note = "Call poll_dbvm_watch to get logs without stopping, or stop_dbvm_watch to end"
 }}
 "#,
         address, mode_lua, max_entries
     );
 
-    execute_structured_snippet(code.as_str())
+    enrich_dbvm_watch_start_response(execute_structured_snippet(code.as_str()), &ctx)
 }
 
 fn poll_dbvm_watch(params_json: &str) -> ToolResponse {
@@ -788,6 +797,7 @@ fn poll_dbvm_watch(params_json: &str) -> ToolResponse {
         Ok(value) => value,
         Err(error) => return error_response(error),
     };
+    let ctx = util::parse_request_context(&params);
 
     let address = match util::parse_address(params.get("address")) {
         Ok(address) => address,
@@ -825,6 +835,7 @@ if okLog and log then
     local entry = log[i]
     results[#results + 1] = {{
       hit_number = i,
+      instruction_address = entry.RIP and string.format("0x%X", entry.RIP) or nil,
       ESP = entry.RSP and (entry.RSP % 0x100000000) or nil,
       RSP = entry.RSP and string.format("0x%X", entry.RSP) or nil,
       EIP = entry.RIP and (entry.RIP % 0x100000000) or nil,
@@ -834,18 +845,32 @@ if okLog and log then
       EDX = entry.RDX and (entry.RDX % 0x100000000) or nil,
       EBX = entry.RBX and (entry.RBX % 0x100000000) or nil,
       ESI = entry.RSI and (entry.RSI % 0x100000000) or nil,
-      EDI = entry.RDI and (entry.RDI % 0x100000000) or nil
+      EDI = entry.RDI and (entry.RDI % 0x100000000) or nil,
+      registers = {{
+        RAX = entry.RAX and string.format("0x%X", entry.RAX) or nil,
+        RBX = entry.RBX and string.format("0x%X", entry.RBX) or nil,
+        RCX = entry.RCX and string.format("0x%X", entry.RCX) or nil,
+        RDX = entry.RDX and string.format("0x%X", entry.RDX) or nil,
+        RSI = entry.RSI and string.format("0x%X", entry.RSI) or nil,
+        RDI = entry.RDI and string.format("0x%X", entry.RDI) or nil,
+        RBP = entry.RBP and string.format("0x%X", entry.RBP) or nil,
+        RSP = entry.RSP and string.format("0x%X", entry.RSP) or nil,
+        RIP = entry.RIP and string.format("0x%X", entry.RIP) or nil
+      }}
     }}
   end
 end
 
+local observedAt = os.time()
 return {{
   success = true,
   status = "active",
   virtual_address = watchKey,
   physical_address = string.format("0x%X", watchInfo.physical),
   mode = watchInfo.mode,
-  uptime_seconds = os.time() - (watchInfo.start_time or os.time()),
+  started_at = watchInfo.start_time,
+  observed_at = observedAt,
+  uptime_seconds = observedAt - (watchInfo.start_time or observedAt),
   hit_count = #results,
   hits = results,
   note = "Watch still active. Call again to get more logs, or stop_dbvm_watch to end."
@@ -854,7 +879,7 @@ return {{
         address, max_results
     );
 
-    execute_structured_snippet(code.as_str())
+    enrich_dbvm_watch_hits_response(execute_structured_snippet(code.as_str()), &ctx, "poll")
 }
 
 fn stop_dbvm_watch(params_json: &str) -> ToolResponse {
@@ -862,6 +887,7 @@ fn stop_dbvm_watch(params_json: &str) -> ToolResponse {
         Ok(value) => value,
         Err(error) => return error_response(error),
     };
+    let ctx = util::parse_request_context(&params);
 
     let address = match util::parse_address(params.get("address")) {
         Ok(address) => address,
@@ -914,6 +940,7 @@ if okLog and log then
   end
 end
 
+local stoppedAt = os.time()
 pcall(dbvm_watch_disable, watchInfo.id)
 watches[watchKey] = nil
 
@@ -922,8 +949,10 @@ return {{
   virtual_address = watchKey,
   physical_address = string.format("0x%X", watchInfo.physical),
   mode = watchInfo.mode,
+  started_at = watchInfo.start_time,
+  stopped_at = stoppedAt,
   hit_count = #results,
-  duration_seconds = os.time() - (watchInfo.start_time or os.time()),
+  duration_seconds = stoppedAt - (watchInfo.start_time or stoppedAt),
   hits = results,
   note = (#results > 0) and "Found instructions that accessed the memory" or "No accesses detected during monitoring"
 }}
@@ -931,7 +960,7 @@ return {{
         address
     );
 
-    execute_structured_snippet(code.as_str())
+    enrich_dbvm_watch_hits_response(execute_structured_snippet(code.as_str()), &ctx, "stop")
 }
 
 fn parse_breakpoint_address(value: Option<&Value>) -> Result<AddressParam, String> {
@@ -1049,6 +1078,320 @@ fn execute_structured_snippet(code: &str) -> ToolResponse {
             body_json: merge_structured_body(body).to_string(),
         },
         Err(error) => error_response(error),
+    }
+}
+
+fn current_modules() -> Vec<runtime::ModuleInfo> {
+    let Some(app) = runtime::app_state() else {
+        return Vec::new();
+    };
+
+    let process_id = app.opened_process_id().unwrap_or(0);
+    if process_id == 0 {
+        return Vec::new();
+    }
+
+    runtime::enum_modules(process_id).unwrap_or_default()
+}
+
+fn enrich_breakpoint_hits_response(response: ToolResponse, ctx: &RequestContext) -> ToolResponse {
+    if !response.success {
+        return response;
+    }
+
+    let Ok(mut body) = serde_json::from_str::<Value>(&response.body_json) else {
+        return response;
+    };
+    let Some(object) = body.as_object_mut() else {
+        return response;
+    };
+    let Some(hits) = object.get("hits").and_then(Value::as_array) else {
+        return response;
+    };
+
+    let modules = current_modules();
+    let evidence = hits
+        .iter()
+        .enumerate()
+        .filter_map(|(index, hit)| build_breakpoint_evidence(hit, index, ctx, &modules))
+        .collect::<Vec<_>>();
+
+    object.insert("evidence".to_owned(), json!(evidence));
+    ToolResponse {
+        success: true,
+        body_json: Value::Object(object.clone()).to_string(),
+    }
+}
+
+fn build_breakpoint_evidence(
+    hit: &Value,
+    index: usize,
+    ctx: &RequestContext,
+    modules: &[runtime::ModuleInfo],
+) -> Option<EvidenceRecord> {
+    let hit_obj = hit.as_object()?;
+    let breakpoint_id = hit_obj
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("breakpoint");
+    let address_value = hit_obj.get("address");
+    let address = util::parse_address(address_value).ok();
+    let normalized_address =
+        address.and_then(|value| addressing::normalize_address_from_modules(value, modules));
+    let registers = hit_obj
+        .get("registers")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|text| (key.clone(), text.to_owned()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .filter(|map| !map.is_empty());
+    let timestamp = hit_obj
+        .get("timestamp")
+        .map(|value| match value {
+            Value::Number(number) => number.to_string(),
+            Value::String(text) => text.clone(),
+            _ => "unknown".to_owned(),
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    let summary = hit_obj
+        .get("instruction")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            hit_obj
+                .get("breakpoint_type")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+
+    Some(EvidenceRecord {
+        evidence_id: format!("{}-{}", breakpoint_id, index),
+        event_type: EvidenceType::BreakpointHit,
+        captured_at: timestamp,
+        session_id: ctx.session_id.clone(),
+        scenario_id: ctx.scenario_id.clone(),
+        address: normalized_address,
+        thread_id: None,
+        registers,
+        summary,
+        payload: hit.clone(),
+        tags: ctx.tags.clone().unwrap_or_default(),
+    })
+}
+
+fn enrich_dbvm_watch_start_response(response: ToolResponse, ctx: &RequestContext) -> ToolResponse {
+    if !response.success {
+        return response;
+    }
+
+    let Ok(mut body) = serde_json::from_str::<Value>(&response.body_json) else {
+        return response;
+    };
+    let Some(object) = body.as_object_mut() else {
+        return response;
+    };
+
+    let modules = current_modules();
+    let evidence = build_dbvm_watch_start_evidence(&Value::Object(object.clone()), ctx, &modules)
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    object.insert("evidence".to_owned(), json!(evidence));
+    ToolResponse {
+        success: true,
+        body_json: Value::Object(object.clone()).to_string(),
+    }
+}
+
+fn enrich_dbvm_watch_hits_response(
+    response: ToolResponse,
+    ctx: &RequestContext,
+    phase: &str,
+) -> ToolResponse {
+    if !response.success {
+        return response;
+    }
+
+    let Ok(mut body) = serde_json::from_str::<Value>(&response.body_json) else {
+        return response;
+    };
+    let Some(object) = body.as_object_mut() else {
+        return response;
+    };
+    let Some(hits) = object.get("hits").and_then(Value::as_array) else {
+        object.insert("evidence".to_owned(), json!([]));
+        return ToolResponse {
+            success: true,
+            body_json: Value::Object(object.clone()).to_string(),
+        };
+    };
+
+    let modules = current_modules();
+    let watch_payload = Value::Object(object.clone());
+    let evidence = hits
+        .iter()
+        .enumerate()
+        .filter_map(|(index, hit)| {
+            build_dbvm_watch_hit_evidence(hit, index, phase, ctx, &modules, &watch_payload)
+        })
+        .collect::<Vec<_>>();
+
+    object.insert("evidence".to_owned(), json!(evidence));
+    ToolResponse {
+        success: true,
+        body_json: Value::Object(object.clone()).to_string(),
+    }
+}
+
+fn build_dbvm_watch_start_evidence(
+    body: &Value,
+    ctx: &RequestContext,
+    modules: &[runtime::ModuleInfo],
+) -> Option<EvidenceRecord> {
+    let body_obj = body.as_object()?;
+    let watch_key = body_obj
+        .get("virtual_address")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let physical_address = body_obj
+        .get("physical_address")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mode = body_obj
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let address = util::parse_address(body_obj.get("virtual_address"))
+        .ok()
+        .and_then(|value| addressing::normalize_address_from_modules(value, modules));
+    let captured_at =
+        scalar_to_string(body_obj.get("started_at")).unwrap_or_else(|| "unknown".to_owned());
+
+    Some(EvidenceRecord {
+        evidence_id: format!("dbvm-watch-start-{}", watch_key),
+        event_type: EvidenceType::ManualNote,
+        captured_at,
+        session_id: ctx.session_id.clone(),
+        scenario_id: ctx.scenario_id.clone(),
+        address,
+        thread_id: None,
+        registers: None,
+        summary: Some(format!(
+            "dbvm watch started: {} -> {} ({})",
+            watch_key, physical_address, mode
+        )),
+        payload: body.clone(),
+        tags: ctx.tags.clone().unwrap_or_default(),
+    })
+}
+
+fn build_dbvm_watch_hit_evidence(
+    hit: &Value,
+    index: usize,
+    phase: &str,
+    ctx: &RequestContext,
+    modules: &[runtime::ModuleInfo],
+    watch_payload: &Value,
+) -> Option<EvidenceRecord> {
+    let hit_obj = hit.as_object()?;
+    let watch_obj = watch_payload.as_object()?;
+    let watch_key = watch_obj
+        .get("virtual_address")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mode = watch_obj
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let instruction_address = hit_obj
+        .get("instruction_address")
+        .or_else(|| hit_obj.get("RIP"));
+    let address = util::parse_address(instruction_address)
+        .ok()
+        .and_then(|value| addressing::normalize_address_from_modules(value, modules));
+    let registers = collect_registers(hit_obj);
+    let captured_at = scalar_to_string(hit_obj.get("timestamp"))
+        .or_else(|| scalar_to_string(watch_obj.get("observed_at")))
+        .or_else(|| scalar_to_string(watch_obj.get("stopped_at")))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let summary = hit_obj
+        .get("instruction")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("dbvm watch {} hit #{} on {}", mode, index + 1, watch_key));
+
+    let mut payload = hit.clone();
+    if let Value::Object(payload_obj) = &mut payload {
+        if let Some(value) = watch_obj.get("virtual_address") {
+            payload_obj.insert("watched_virtual_address".to_owned(), value.clone());
+        }
+        if let Some(value) = watch_obj.get("physical_address") {
+            payload_obj.insert("watched_physical_address".to_owned(), value.clone());
+        }
+        if let Some(value) = watch_obj.get("mode") {
+            payload_obj.insert("watch_mode".to_owned(), value.clone());
+        }
+        payload_obj.insert("watch_phase".to_owned(), Value::String(phase.to_owned()));
+    }
+
+    Some(EvidenceRecord {
+        evidence_id: format!("dbvm-watch-{}-{}-{}", phase, watch_key, index),
+        event_type: EvidenceType::BreakpointHit,
+        captured_at,
+        session_id: ctx.session_id.clone(),
+        scenario_id: ctx.scenario_id.clone(),
+        address,
+        thread_id: None,
+        registers,
+        summary: Some(summary),
+        payload,
+        tags: ctx.tags.clone().unwrap_or_default(),
+    })
+}
+
+fn collect_registers(hit_obj: &Map<String, Value>) -> Option<BTreeMap<String, String>> {
+    if let Some(map) = hit_obj.get("registers").and_then(Value::as_object) {
+        let registers = map
+            .iter()
+            .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_owned())))
+            .collect::<BTreeMap<_, _>>();
+        if !registers.is_empty() {
+            return Some(registers);
+        }
+    }
+
+    const REGISTER_KEYS: &[&str] = &[
+        "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP", "RIP", "R8", "R9", "R10", "R11",
+        "R12", "R13", "R14", "R15", "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP",
+    ];
+
+    let registers = REGISTER_KEYS
+        .iter()
+        .filter_map(|key| {
+            hit_obj
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(|text| ((*key).to_owned(), text.to_owned()))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    if registers.is_empty() {
+        None
+    } else {
+        Some(registers)
+    }
+}
+
+fn scalar_to_string(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
     }
 }
 

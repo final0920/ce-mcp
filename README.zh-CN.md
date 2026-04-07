@@ -97,6 +97,8 @@ ce_plugin/target/release/ce_plugin.dll
 - `get_thread_list`: 枚举目标进程线程列表。
 - `get_symbol_address`: 将 symbol 或模块表达式解析为地址。
 - `get_address_info`: 将地址反查为模块、段与符号信息。
+- `normalize_address`: 将运行时地址标准化为 `module_name / module_base / va / rva`。
+- `get_module_fingerprint`: 返回模块构建指纹，包括 image base、image size、PE 时间戳、入口 RVA、section hash 与 import hash。
 - `get_rtti_classname`: 尝试根据 RTTI 推断对象类名。
 
 ### 内存读写
@@ -108,6 +110,7 @@ ce_plugin/target/release/ce_plugin.dll
 - `read_string`: 读取 ANSI 或 UTF-16 字符串。
 - `read_pointer`: 读取单层指针，带 offsets 时可继续解析链路。
 - `read_pointer_chain`: 解析多级指针链并返回每一层路径。
+- `batch_read_memory`: 一次请求批量读取多段内存。
 - `write_memory`: 向指定地址写入原始字节。
 - `write_integer`: 写入数值类型。
 - `write_string`: 写入 ANSI 或 UTF-16 字符串。
@@ -131,6 +134,7 @@ ce_plugin/target/release/ce_plugin.dll
 用于把“地址”推进成“代码逻辑”和“行为理解”。
 
 - `disassemble`: 对目标地址范围执行反汇编。
+- `batch_disassemble`: 一次请求批量反汇编多个地址范围。
 - `get_instruction_info`: 获取单条指令的详细解码信息。
 - `find_function_boundaries`: 启发式定位函数起止边界。
 - `analyze_function`: 提取函数内 call 关系与基础分析结果。
@@ -147,11 +151,20 @@ ce_plugin/target/release/ce_plugin.dll
 - `remove_breakpoint`: 按 id 删除断点。
 - `list_breakpoints`: 列出当前活动断点。
 - `clear_all_breakpoints`: 清空全部断点。
-- `get_breakpoint_hits`: 获取断点命中记录，可按需清空历史。
+- `get_breakpoint_hits`: 获取断点命中记录，并返回结构化 `evidence`。
 - `get_physical_address`: 将虚拟地址转换为物理地址。
 - `start_dbvm_watch`: 启动 DBVM watch 追踪会话。
 - `poll_dbvm_watch`: 轮询 DBVM watch 中间结果而不停止会话。
 - `stop_dbvm_watch`: 停止 DBVM watch 并返回最终结果。
+
+## 输出约定
+
+近期改造后，运行时结果开始逐步统一：
+
+- 地址类结果会尽量返回 `normalized_address`
+- 指针/链路类结果会尽量补充标准化后的目标地址
+- 断点与 DBVM watch 流程会返回结构化 `evidence`
+- batch 接口按单项容错设计，单条失败不会中断整批
 
 ### 脚本
 

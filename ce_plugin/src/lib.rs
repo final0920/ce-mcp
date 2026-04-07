@@ -1,3 +1,4 @@
+mod domain;
 mod ffi;
 mod http;
 mod runtime;

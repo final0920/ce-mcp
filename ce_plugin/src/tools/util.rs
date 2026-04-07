@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::domain::context::RequestContext;
 use crate::runtime;
 
 use super::ToolResponse;
@@ -76,9 +77,47 @@ pub fn format_address(address: usize) -> String {
     }
 }
 
+pub fn format_u64_hex(value: u64) -> String {
+    format!("0x{:016X}", value)
+}
+
+pub fn format_rva(value: usize) -> String {
+    format!("0x{:X}", value)
+}
+
 pub fn parse_params(params_json: &str) -> Result<Value, String> {
     serde_json::from_str::<Value>(params_json)
         .map_err(|error| format!("invalid params json: {}", error))
+}
+
+pub fn parse_request_context(params: &Value) -> RequestContext {
+    let tags = params
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty());
+
+    RequestContext {
+        build_version: params
+            .get("build_version")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        session_id: params
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        scenario_id: params
+            .get("scenario_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        tags,
+    }
 }
 
 pub trait FromLeBytes<const N: usize> {

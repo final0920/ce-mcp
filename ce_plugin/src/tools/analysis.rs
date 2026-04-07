@@ -3,7 +3,7 @@ use core::ffi::c_void;
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter, Mnemonic};
 use serde_json::{json, Value};
 
-use super::{util, ToolResponse};
+use super::{addressing, util, ToolResponse};
 use crate::runtime;
 
 const METHODS: &[&str] = &[
@@ -62,12 +62,14 @@ fn disassemble(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    let instructions = decode_instructions(address, &bytes, count);
+    let modules = current_modules();
+    let instructions = decode_instructions(address, &bytes, count, &modules);
     ToolResponse {
         success: true,
         body_json: json!({
             "success": true,
             "address": util::format_address(address),
+            "normalized_address": addressing::normalize_address_from_modules(address, &modules),
             "count": instructions.len(),
             "instructions": instructions,
         })
@@ -93,7 +95,8 @@ fn get_instruction_info(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    let instruction = match decode_one_instruction(address, &bytes) {
+    let modules = current_modules();
+    let instruction = match decode_one_instruction(address, &bytes, &modules) {
         Ok(instruction) => instruction,
         Err(error) => return error_response(error),
     };
@@ -103,6 +106,7 @@ fn get_instruction_info(params_json: &str) -> ToolResponse {
         body_json: json!({
             "success": true,
             "address": util::format_address(address),
+            "normalized_address": addressing::normalize_address_from_modules(address, &modules),
             "instruction": instruction,
         })
         .to_string(),
@@ -124,21 +128,27 @@ fn find_function_boundaries(params_json: &str) -> ToolResponse {
     let max_search = parse_usize(params.get("max_search"), 4096, 0x20_000);
 
     match locate_function_boundaries(handle, address, max_search) {
-        Ok(boundary) => ToolResponse {
-            success: true,
-            body_json: json!({
-                "success": true,
-                "found": true,
-                "query_address": util::format_address(address),
-                "function_start": util::format_address(boundary.start),
-                "function_end": boundary.end.map(util::format_address),
-                "function_size": boundary.end.map(|end| end.saturating_sub(boundary.start).saturating_add(1)),
-                "prologue_type": boundary.prologue_type,
-                "arch": "x64",
-                "note": boundary.note,
-            })
-            .to_string(),
-        },
+        Ok(boundary) => {
+            let modules = current_modules();
+            ToolResponse {
+                success: true,
+                body_json: json!({
+                    "success": true,
+                    "found": true,
+                    "query_address": util::format_address(address),
+                    "query_normalized_address": addressing::normalize_address_from_modules(address, &modules),
+                    "function_start": util::format_address(boundary.start),
+                    "function_start_normalized": addressing::normalize_address_from_modules(boundary.start, &modules),
+                    "function_end": boundary.end.map(util::format_address),
+                    "function_end_normalized": boundary.end.and_then(|end| addressing::normalize_address_from_modules(end, &modules)),
+                    "function_size": boundary.end.map(|end| end.saturating_sub(boundary.start).saturating_add(1)),
+                    "prologue_type": boundary.prologue_type,
+                    "arch": "x64",
+                    "note": boundary.note,
+                })
+                .to_string(),
+            }
+        }
         Err(error) => ToolResponse {
             success: true,
             body_json: json!({
@@ -186,14 +196,17 @@ fn analyze_function(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
+    let modules = current_modules();
     let decoded = decode_instruction_records(boundary.start, &bytes, MAX_DISASSEMBLY_COUNT);
     let mut calls = Vec::new();
     for record in &decoded {
         if flow_control_is_call(record.instruction.flow_control()) {
             calls.push(json!({
                 "call_site": util::format_address(record.address),
+                "call_site_normalized": addressing::normalize_address_from_modules(record.address, &modules),
                 "instruction": record.text,
                 "target": record.branch_target.map(util::format_address),
+                "target_normalized": record.branch_target.and_then(|target| addressing::normalize_address_from_modules(target, &modules)),
                 "type": if record.branch_target.is_some() { "direct" } else { "indirect" },
             }));
         }
@@ -204,7 +217,9 @@ fn analyze_function(params_json: &str) -> ToolResponse {
         body_json: json!({
             "success": true,
             "function_start": util::format_address(boundary.start),
+            "function_start_normalized": addressing::normalize_address_from_modules(boundary.start, &modules),
             "function_end": boundary.end.map(util::format_address),
+            "function_end_normalized": boundary.end.and_then(|end| addressing::normalize_address_from_modules(end, &modules)),
             "prologue_type": boundary.prologue_type,
             "arch": "x64",
             "instruction_count": decoded.len(),
@@ -230,7 +245,8 @@ fn find_references(params_json: &str) -> ToolResponse {
     };
     let limit = parse_usize(params.get("limit"), 50, 500);
 
-    let references = match collect_references(handle, target, limit, false) {
+    let modules = current_modules();
+    let references = match collect_references(handle, target, limit, false, &modules) {
         Ok(references) => references,
         Err(error) => return error_response(error),
     };
@@ -240,6 +256,7 @@ fn find_references(params_json: &str) -> ToolResponse {
         body_json: json!({
             "success": true,
             "target": util::format_address(target),
+            "target_normalized": addressing::normalize_address_from_modules(target, &modules),
             "count": references.len(),
             "references": references,
             "arch": "x64",
@@ -267,7 +284,8 @@ fn find_call_references(params_json: &str) -> ToolResponse {
     };
     let limit = parse_usize(params.get("limit"), 100, 1000);
 
-    let callers = match collect_references(handle, target, limit, true) {
+    let modules = current_modules();
+    let callers = match collect_references(handle, target, limit, true, &modules) {
         Ok(references) => references,
         Err(error) => return error_response(error),
     };
@@ -277,6 +295,7 @@ fn find_call_references(params_json: &str) -> ToolResponse {
         body_json: json!({
             "success": true,
             "function_address": util::format_address(target),
+            "function_address_normalized": addressing::normalize_address_from_modules(target, &modules),
             "count": callers.len(),
             "callers": callers,
             "arch": "x64",
@@ -412,23 +431,34 @@ fn dissect_structure(params_json: &str) -> ToolResponse {
     }
 }
 
-fn decode_instructions(address: usize, bytes: &[u8], count: usize) -> Vec<Value> {
+fn decode_instructions(
+    address: usize,
+    bytes: &[u8],
+    count: usize,
+    modules: &[runtime::ModuleInfo],
+) -> Vec<Value> {
     decode_instruction_records(address, bytes, count)
         .into_iter()
         .map(|record| {
             json!({
                 "address": util::format_address(record.address),
+                "normalized_address": addressing::normalize_address_from_modules(record.address, modules),
                 "bytes": record.bytes_text,
                 "text": record.text,
                 "mnemonic": format_mnemonic(record.instruction.mnemonic()),
                 "length": record.instruction.len(),
                 "next_address": util::format_address(record.instruction.next_ip() as usize),
+                "next_address_normalized": addressing::normalize_address_from_modules(record.instruction.next_ip() as usize, modules),
             })
         })
         .collect()
 }
 
-fn decode_one_instruction(address: usize, bytes: &[u8]) -> Result<Value, String> {
+fn decode_one_instruction(
+    address: usize,
+    bytes: &[u8],
+    modules: &[runtime::ModuleInfo],
+) -> Result<Value, String> {
     let record = decode_instruction_records(address, bytes, 1)
         .into_iter()
         .next()
@@ -436,16 +466,19 @@ fn decode_one_instruction(address: usize, bytes: &[u8]) -> Result<Value, String>
 
     Ok(json!({
         "address": util::format_address(address),
+        "normalized_address": addressing::normalize_address_from_modules(address, modules),
         "bytes": record.bytes_text,
         "text": record.text,
         "mnemonic": format_mnemonic(record.instruction.mnemonic()),
         "length": record.instruction.len() as usize,
         "next_address": util::format_address(record.instruction.next_ip() as usize),
+        "next_address_normalized": addressing::normalize_address_from_modules(record.instruction.next_ip() as usize, modules),
         "op_count": record.instruction.op_count(),
         "is_invalid": false,
         "is_stack_instruction": record.instruction.is_stack_instruction(),
         "flow_control": format!("{:?}", record.instruction.flow_control()).to_ascii_lowercase(),
         "near_branch_target": record.branch_target.map(util::format_address),
+        "near_branch_target_normalized": record.branch_target.and_then(|target| addressing::normalize_address_from_modules(target, modules)),
         "is_ip_rel_memory_operand": record.instruction.is_ip_rel_memory_operand(),
         "ip_rel_memory_address": record
             .instruction
@@ -578,6 +611,7 @@ fn collect_references(
     target: usize,
     limit: usize,
     calls_only: bool,
+    modules: &[runtime::ModuleInfo],
 ) -> Result<Vec<Value>, String> {
     let regions = runtime::enum_memory_regions(handle, None)?;
     let mut results = Vec::new();
@@ -604,8 +638,10 @@ fn collect_references(
             if instruction_references_target(&record, target, calls_only) {
                 results.push(json!({
                     if calls_only { "caller_address" } else { "address" }: util::format_address(record.address),
+                    if calls_only { "caller_address_normalized" } else { "normalized_address" }: addressing::normalize_address_from_modules(record.address, modules),
                     "instruction": record.text,
                     "target": record.branch_target.map(util::format_address),
+                    "target_normalized": record.branch_target.and_then(|target| addressing::normalize_address_from_modules(target, modules)),
                 }));
             }
         }
@@ -761,6 +797,19 @@ fn parse_usize(value: Option<&Value>, default: usize, max: usize) -> usize {
 
 fn opened_process_handle() -> Option<*mut c_void> {
     runtime::app_state().and_then(|app| app.opened_process_handle())
+}
+
+fn current_modules() -> Vec<runtime::ModuleInfo> {
+    let Some(app) = runtime::app_state() else {
+        return Vec::new();
+    };
+
+    let process_id = app.opened_process_id().unwrap_or(0);
+    if process_id == 0 {
+        return Vec::new();
+    }
+
+    runtime::enum_modules(process_id).unwrap_or_default()
 }
 
 fn runtime_unavailable(message: &str) -> ToolResponse {

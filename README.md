@@ -97,6 +97,8 @@ Used to establish context before analysis starts.
 - `get_thread_list`: Enumerates target-process threads for runtime inspection.
 - `get_symbol_address`: Resolves a symbol or module expression into an address.
 - `get_address_info`: Resolves an address back into module-relative metadata.
+- `normalize_address`: Normalizes a runtime address into `module_name / module_base / va / rva`.
+- `get_module_fingerprint`: Returns build-oriented module metadata such as image base, image size, PE timestamp, entry RVA, section hashes, and import hash.
 - `get_rtti_classname`: Attempts RTTI-based class name recovery from an object address.
 
 ### Memory Read/Write
@@ -108,6 +110,7 @@ Used to confirm data layouts, runtime state, object fields, and patch candidates
 - `read_string`: Reads ANSI or UTF-16 strings from memory.
 - `read_pointer`: Reads a pointer value and can continue through offsets when provided.
 - `read_pointer_chain`: Resolves a multi-level pointer chain and reports the traversal path.
+- `batch_read_memory`: Reads multiple memory regions in one call.
 - `write_memory`: Writes raw bytes into process memory.
 - `write_integer`: Writes numeric values into memory.
 - `write_string`: Writes ANSI or UTF-16 strings into memory.
@@ -131,6 +134,7 @@ Used to find candidate values, signatures, regions, and runtime anchors.
 Used to move from raw addresses to code structure and behavioral understanding.
 
 - `disassemble`: Disassembles instructions from a target address range.
+- `batch_disassemble`: Disassembles multiple target ranges in one call.
 - `get_instruction_info`: Decodes a single instruction with detailed metadata.
 - `find_function_boundaries`: Heuristically locates function start and end boundaries.
 - `analyze_function`: Extracts call relationships from a function body.
@@ -147,7 +151,7 @@ Used to observe behavior instead of inferring it statically.
 - `remove_breakpoint`: Removes a breakpoint by id.
 - `list_breakpoints`: Lists active breakpoints.
 - `clear_all_breakpoints`: Clears all active breakpoints.
-- `get_breakpoint_hits`: Returns captured breakpoint-hit records and optional history clearing.
+- `get_breakpoint_hits`: Returns captured breakpoint-hit records and structured `evidence` output.
 - `get_physical_address`: Translates a virtual address to a physical address.
 - `start_dbvm_watch`: Starts a DBVM watch tracing session.
 - `poll_dbvm_watch`: Polls intermediate DBVM watch results without stopping the session.
@@ -161,6 +165,15 @@ Used to automate CE-side logic, validate ideas quickly, and apply patches during
 - `evaluate_lua_file`: Executes a local Lua file inside Cheat Engine.
 - `auto_assemble`: Executes an Auto Assembler script.
 - `auto_assemble_file`: Executes a local Auto Assembler script file.
+
+## Output Conventions
+
+Recent refactors standardize more runtime results for downstream orchestration:
+
+- address-like results increasingly expose `normalized_address`
+- pointer and chain results may also expose normalized pointer targets
+- debug and DBVM watch flows now expose structured `evidence`
+- batch endpoints are designed so one failing item does not abort the whole batch
 
 ### Compatibility Aliases
 

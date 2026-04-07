@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{util, ToolResponse};
+use super::{addressing, util, ToolResponse};
 use crate::runtime;
 
 const METHODS: &[&str] = &[
@@ -10,6 +10,7 @@ const METHODS: &[&str] = &[
     "get_thread_list",
     "get_symbol_address",
     "get_address_info",
+    "normalize_address",
     "get_rtti_classname",
 ];
 
@@ -21,6 +22,7 @@ pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
         "get_thread_list" => get_thread_list(),
         "get_symbol_address" => get_symbol_address(params_json),
         "get_address_info" => get_address_info(params_json),
+        "normalize_address" => normalize_address(params_json),
         "get_rtti_classname" => get_rtti_classname(params_json),
         _ => return None,
     };
@@ -31,6 +33,19 @@ pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
 #[allow(dead_code)]
 pub fn supported_methods() -> &'static [&'static str] {
     METHODS
+}
+
+pub(crate) fn current_modules() -> Vec<runtime::ModuleInfo> {
+    let Some(app) = runtime::app_state() else {
+        return Vec::new();
+    };
+
+    let process_id = app.opened_process_id().unwrap_or(0);
+    if process_id == 0 {
+        return Vec::new();
+    }
+
+    runtime::enum_modules(process_id).unwrap_or_default()
 }
 
 fn ping() -> ToolResponse {
@@ -91,9 +106,19 @@ fn get_process_info() -> ToolResponse {
                 "address": util::format_address(module.base_address),
                 "size": module.size,
                 "path": module.path,
+                "normalized": addressing::normalized_module_metadata(module),
             })
         })
         .collect::<Vec<_>>();
+    let main_module = modules.first().map(|module| {
+        json!({
+            "module_name": module.name,
+            "module_base": util::format_address(module.base_address),
+            "size": module.size,
+            "path": module.path,
+            "normalized": addressing::normalized_module_metadata(module),
+        })
+    });
 
     ToolResponse {
         success: true,
@@ -104,6 +129,7 @@ fn get_process_info() -> ToolResponse {
             "process_name": process_name,
             "module_count": modules_json.len(),
             "modules": modules_json,
+            "main_module": main_module,
             "architecture": "x64",
             "note": "live process response; symbol/rtti integration pending"
         })
@@ -145,6 +171,7 @@ fn enum_modules() -> ToolResponse {
                     "size": module.size,
                     "is_64bit": true,
                     "path": module.path,
+                    "normalized": addressing::normalized_module_metadata(&module),
                 })).collect::<Vec<_>>(),
             })
             .to_string(),
@@ -199,7 +226,7 @@ fn get_thread_list() -> ToolResponse {
 }
 
 fn get_symbol_address(params_json: &str) -> ToolResponse {
-    let Some(app) = runtime::app_state() else {
+    let Some(_app) = runtime::app_state() else {
         return ToolResponse {
             success: false,
             body_json: "runtime not initialized".to_owned(),
@@ -217,12 +244,7 @@ fn get_symbol_address(params_json: &str) -> ToolResponse {
         Some(symbol) if !symbol.trim().is_empty() => symbol.trim(),
         _ => return error_response("missing symbol".to_owned()),
     };
-    let process_id = app.opened_process_id().unwrap_or(0);
-    let modules = if process_id != 0 {
-        runtime::enum_modules(process_id).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let modules = current_modules();
 
     match resolve_symbol_address(symbol, &modules) {
         Ok(address) => ToolResponse {
@@ -239,41 +261,15 @@ fn get_symbol_address(params_json: &str) -> ToolResponse {
     }
 }
 
-fn get_address_info(params_json: &str) -> ToolResponse {
-    let Some(app) = runtime::app_state() else {
-        return ToolResponse {
-            success: false,
-            body_json: "runtime not initialized".to_owned(),
-        };
-    };
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-    let include_modules = params
-        .get("include_modules")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let include_symbols = params
-        .get("include_symbols")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let include_sections = params
-        .get("include_sections")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    let process_id = app.opened_process_id().unwrap_or(0);
-    let modules = if process_id != 0 {
-        runtime::enum_modules(process_id).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let address = match resolve_address_param(params.get("address"), &modules) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
-    };
-    let module = find_module_for_address(address, &modules);
+pub(crate) fn address_info_json(
+    address: usize,
+    modules: &[runtime::ModuleInfo],
+    include_modules: bool,
+    include_symbols: bool,
+    include_sections: bool,
+) -> Value {
+    let module = find_module_for_address(address, modules);
+    let normalized_address = addressing::normalize_address_from_modules(address, modules);
 
     let module_json = if include_modules {
         module.map(|module| {
@@ -283,6 +279,7 @@ fn get_address_info(params_json: &str) -> ToolResponse {
                 "base": util::format_address(module.base_address),
                 "size": module.size,
                 "offset": address.saturating_sub(module.base_address),
+                "normalized": addressing::normalized_module_metadata(module),
             })
         })
     } else {
@@ -312,15 +309,83 @@ fn get_address_info(params_json: &str) -> ToolResponse {
         None
     };
 
+    json!({
+        "success": true,
+        "address": util::format_address(address),
+        "normalized_address": normalized_address,
+        "module": module_json,
+        "symbol": symbol_json,
+        "section": section_json,
+        "has_module_match": module.is_some(),
+    })
+}
+
+fn get_address_info(params_json: &str) -> ToolResponse {
+    let Some(_app) = runtime::app_state() else {
+        return ToolResponse {
+            success: false,
+            body_json: "runtime not initialized".to_owned(),
+        };
+    };
+    let params = match util::parse_params(params_json) {
+        Ok(value) => value,
+        Err(error) => return error_response(error),
+    };
+    let include_modules = params
+        .get("include_modules")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let include_symbols = params
+        .get("include_symbols")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let include_sections = params
+        .get("include_sections")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let modules = current_modules();
+    let address = match resolve_address_param(params.get("address"), &modules) {
+        Ok(address) => address,
+        Err(error) => return error_response(error),
+    };
+
+    ToolResponse {
+        success: true,
+        body_json: address_info_json(
+            address,
+            &modules,
+            include_modules,
+            include_symbols,
+            include_sections,
+        )
+        .to_string(),
+    }
+}
+
+fn normalize_address(params_json: &str) -> ToolResponse {
+    let Some(_app) = runtime::app_state() else {
+        return ToolResponse {
+            success: false,
+            body_json: "runtime not initialized".to_owned(),
+        };
+    };
+    let params = match util::parse_params(params_json) {
+        Ok(value) => value,
+        Err(error) => return error_response(error),
+    };
+    let modules = current_modules();
+    let address = match resolve_address_param(params.get("address"), &modules) {
+        Ok(address) => address,
+        Err(error) => return error_response(error),
+    };
+
     ToolResponse {
         success: true,
         body_json: json!({
             "success": true,
             "address": util::format_address(address),
-            "module": module_json,
-            "symbol": symbol_json,
-            "section": section_json,
-            "has_module_match": module.is_some(),
+            "normalized_address": addressing::normalize_address_from_modules(address, &modules),
         })
         .to_string(),
     }
@@ -341,12 +406,7 @@ fn get_rtti_classname(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    let process_id = app.opened_process_id().unwrap_or(0);
-    let modules = if process_id != 0 {
-        runtime::enum_modules(process_id).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let modules = current_modules();
     let address = match resolve_address_param(params.get("address"), &modules) {
         Ok(address) => address,
         Err(error) => return error_response(error),
@@ -381,7 +441,10 @@ fn get_rtti_classname(params_json: &str) -> ToolResponse {
     }
 }
 
-fn resolve_symbol_address(symbol: &str, modules: &[runtime::ModuleInfo]) -> Result<usize, String> {
+pub(crate) fn resolve_symbol_address(
+    symbol: &str,
+    modules: &[runtime::ModuleInfo],
+) -> Result<usize, String> {
     let trimmed = symbol.trim();
     if let Ok(address) = util::parse_address(Some(&Value::String(trimmed.to_owned()))) {
         return Ok(address);
@@ -440,7 +503,7 @@ fn parse_number_text(text: &str) -> Option<usize> {
     None
 }
 
-fn resolve_address_param(
+pub(crate) fn resolve_address_param(
     raw_address: Option<&Value>,
     modules: &[runtime::ModuleInfo],
 ) -> Result<usize, String> {
@@ -453,7 +516,7 @@ fn resolve_address_param(
     }
 }
 
-fn find_module_by_name<'a>(
+pub(crate) fn find_module_by_name<'a>(
     module_name: &str,
     modules: &'a [runtime::ModuleInfo],
 ) -> Option<&'a runtime::ModuleInfo> {
@@ -482,7 +545,7 @@ fn module_name_matches(needle: &str, module: &runtime::ModuleInfo) -> bool {
     module_stem == needle_stem
 }
 
-fn find_module_for_address<'a>(
+pub(crate) fn find_module_for_address<'a>(
     address: usize,
     modules: &'a [runtime::ModuleInfo],
 ) -> Option<&'a runtime::ModuleInfo> {
