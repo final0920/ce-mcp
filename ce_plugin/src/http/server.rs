@@ -16,15 +16,17 @@ const MAX_MCP_BODY_BYTES: usize = 256 * 1024;
 #[derive(Debug)]
 pub struct StreamableHttpServer {
     bind_addr: String,
+    allow_remote: bool,
     running: bool,
     stop_flag: Option<Arc<AtomicBool>>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl StreamableHttpServer {
-    pub fn new(bind_addr: String) -> Self {
+    pub fn new(bind_addr: String, allow_remote: bool) -> Self {
         Self {
             bind_addr,
+            allow_remote,
             running: false,
             stop_flag: None,
             worker: None,
@@ -43,6 +45,7 @@ impl StreamableHttpServer {
             .map_err(|error| format!("failed to set nonblocking listener: {}", error))?;
 
         let bind_addr = self.bind_addr.clone();
+        let allow_remote = self.allow_remote;
         let stop_flag = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop_flag);
 
@@ -54,9 +57,13 @@ impl StreamableHttpServer {
                 while !worker_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, peer)) => {
-                            if let Err(error) =
-                                handle_connection(&mut stream, peer, plugin_id, &bind_addr)
-                            {
+                            if let Err(error) = handle_connection(
+                                &mut stream,
+                                peer,
+                                plugin_id,
+                                &bind_addr,
+                                allow_remote,
+                            ) {
                                 console::error(format!(
                                     "处理 {} 的 HTTP 连接失败: {}",
                                     peer, error
@@ -107,6 +114,7 @@ fn handle_connection(
     peer: SocketAddr,
     plugin_id: i32,
     bind_addr: &str,
+    allow_remote: bool,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -115,7 +123,7 @@ fn handle_connection(
         .set_write_timeout(Some(Duration::from_secs(1)))
         .map_err(|error| format!("failed to set write timeout: {}", error))?;
 
-    if !peer.ip().is_loopback() {
+    if !allow_remote && !peer.ip().is_loopback() {
         console::warn(format!("已拒绝非回环地址访问: {}", peer));
         return write_http_json_response(
             stream,

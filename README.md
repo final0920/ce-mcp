@@ -198,6 +198,7 @@ Used to preserve compatibility with previous tool names.
 | Variable | Description | Default |
 |---|---|---|
 | `CE_PLUGIN_BIND_ADDR` | Plugin HTTP bind address. | `127.0.0.1:18765` |
+| `CE_PLUGIN_ALLOW_REMOTE` | Allow non-loopback HTTP clients. Keep disabled unless you intentionally expose the endpoint through a trusted tunnel or private network. | disabled |
 | `CE_PLUGIN_DISPATCH_TIMEOUT_MS` | Main-thread dispatch timeout. | `15000` |
 | `CE_PLUGIN_CONSOLE_LOG` | Set `0` to disable console logging. | enabled |
 | `CE_PLUGIN_CONSOLE_TITLE` | Console window title. | `流云MCP插件` |

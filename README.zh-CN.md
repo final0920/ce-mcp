@@ -198,6 +198,7 @@ ce_plugin/target/release/ce_plugin.dll
 | 变量 | 说明 | 默认值 |
 |---|---|---|
 | `CE_PLUGIN_BIND_ADDR` | 插件 HTTP 监听地址。 | `127.0.0.1:18765` |
+| `CE_PLUGIN_ALLOW_REMOTE` | 是否允许非回环地址访问 HTTP 接口。除非你明确通过可信隧道或私网开放联调，否则保持关闭。 | 默认关闭 |
 | `CE_PLUGIN_DISPATCH_TIMEOUT_MS` | 主线程调度超时。 | `15000` |
 | `CE_PLUGIN_CONSOLE_LOG` | 设为 `0` 时关闭控制台日志。 | 默认开启 |
 | `CE_PLUGIN_CONSOLE_TITLE` | 控制台窗口标题。 | `流云MCP插件` |

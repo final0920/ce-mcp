@@ -1,6 +1,7 @@
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub bind_addr: String,
+    pub allow_remote: bool,
     pub dispatch_timeout_ms: u64,
     pub console_log_enabled: bool,
     pub console_title: String,
@@ -15,6 +16,7 @@ impl RuntimeConfig {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "127.0.0.1:18765".to_owned()),
+            allow_remote: env_true("CE_PLUGIN_ALLOW_REMOTE"),
             dispatch_timeout_ms: std::env::var("CE_PLUGIN_DISPATCH_TIMEOUT_MS")
                 .ok()
                 .and_then(|value| value.trim().parse::<u64>().ok())
@@ -38,6 +40,18 @@ fn env_false(name: &str) -> bool {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn env_true(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
             )
         })
         .unwrap_or(false)

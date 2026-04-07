@@ -38,11 +38,11 @@ pub fn init_runtime(plugin_id: i32, exported_functions: *const ExportedFunctions
     let config = RuntimeConfig::load();
     console::initialize(config.console_log_enabled, config.console_title.as_str());
     console::info(format!(
-        "插件启动中: plugin_id={} 监听地址={} 超时={}ms",
-        plugin_id, config.bind_addr, config.dispatch_timeout_ms
+        "插件启动中: plugin_id={} 监听地址={} allow_remote={} 超时={}ms",
+        plugin_id, config.bind_addr, config.allow_remote, config.dispatch_timeout_ms
     ));
     let dispatcher = MainThreadDispatcher::new();
-    let server = StreamableHttpServer::new(config.bind_addr.clone());
+    let server = StreamableHttpServer::new(config.bind_addr.clone(), config.allow_remote);
     let app = Arc::new(AppState::new(
         plugin_id,
         config,
