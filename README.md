@@ -203,6 +203,20 @@ Used to preserve compatibility with previous tool names.
 | `CE_PLUGIN_CONSOLE_LOG` | Set `0` to disable console logging. | enabled |
 | `CE_PLUGIN_CONSOLE_TITLE` | Console window title. | `流云MCP插件` |
 
+The plugin now prefers a config file placed next to the plugin DLL (fallback: process executable directory), and then applies environment variables as overrides.
+
+Supported config filenames:
+- `ce_plugin.config`
+- `ce_plugin.env`
+
+Example:
+```text
+CE_PLUGIN_BIND_ADDR=0.0.0.0:18765
+CE_PLUGIN_ALLOW_REMOTE=1
+CE_PLUGIN_DISPATCH_TIMEOUT_MS=5000
+CE_PLUGIN_CONSOLE_TITLE=流云MCP插件
+```
+
 ## Project Layout
 
 ```text

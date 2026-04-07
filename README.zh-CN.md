@@ -203,6 +203,20 @@ ce_plugin/target/release/ce_plugin.dll
 | `CE_PLUGIN_CONSOLE_LOG` | 设为 `0` 时关闭控制台日志。 | 默认开启 |
 | `CE_PLUGIN_CONSOLE_TITLE` | 控制台窗口标题。 | `流云MCP插件` |
 
+插件现在会优先读取 **插件 DLL 同级目录** 下的配置文件（兜底再读进程可执行文件目录），然后再应用环境变量覆盖。
+
+支持的配置文件名：
+- `ce_plugin.config`
+- `ce_plugin.env`
+
+示例：
+```text
+CE_PLUGIN_BIND_ADDR=0.0.0.0:18765
+CE_PLUGIN_ALLOW_REMOTE=1
+CE_PLUGIN_DISPATCH_TIMEOUT_MS=5000
+CE_PLUGIN_CONSOLE_TITLE=流云MCP插件
+```
+
 ## 项目结构
 
 ```text
