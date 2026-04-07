@@ -461,8 +461,8 @@ mod tests {
         bytes[0xA8..0xAC].copy_from_slice(&(0x2000u32).to_le_bytes());
         bytes[0xB0..0xB8].copy_from_slice(&(0x140000000u64).to_le_bytes());
         bytes[0xD0..0xD4].copy_from_slice(&(0x500000u32).to_le_bytes());
-        bytes[0x108..0x10C].copy_from_slice(&(0x3000u32).to_le_bytes());
-        bytes[0x10C..0x110].copy_from_slice(&(0x100u32).to_le_bytes());
+        bytes[0x110..0x114].copy_from_slice(&(0x3000u32).to_le_bytes());
+        bytes[0x114..0x118].copy_from_slice(&(0x100u32).to_le_bytes());
         bytes[0x188..0x190].copy_from_slice(b".text\0\0\0");
         bytes[0x190..0x194].copy_from_slice(&(0x2000u32).to_le_bytes());
         bytes[0x194..0x198].copy_from_slice(&(0x1000u32).to_le_bytes());
