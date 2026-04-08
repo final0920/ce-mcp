@@ -11,6 +11,7 @@ mod lua_client;
 mod lua_host;
 mod memory;
 mod process;
+mod registry;
 mod scan;
 mod script;
 mod util;
@@ -19,6 +20,8 @@ use std::borrow::Cow;
 use std::cell::Cell;
 
 use serde_json::{json, Value};
+
+pub use registry::{all_tools, canonical_name, find_tool};
 
 thread_local! {
     static MAIN_THREAD_DISPATCH_DEPTH: Cell<usize> = Cell::new(0);

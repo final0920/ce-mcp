@@ -18,6 +18,13 @@ struct JsonRpcRequest {
     params: Option<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ToolsCallParams {
+    name: String,
+    #[serde(default)]
+    arguments: Option<Value>,
+}
+
 pub fn bootstrap(plugin_id: i32, bind_addr: &str) -> String {
     format!(
         "{{\"status\":\"bootstrapped\",\"plugin_id\":{},\"bind_addr\":\"{}\",\"build_version\":\"{}\"}}",
@@ -119,55 +126,175 @@ pub fn handle_request(method: &str, params_json: &str) -> ToolResponse {
 }
 
 fn dispatch_method(method: &str, params_json: &str, ctx: &McpContext<'_>) -> ToolResponse {
-    if method == "ping" {
-        let (
-            dispatcher_mode,
-            dispatcher_available,
-            dispatch_timeout_ms,
-            console_log_enabled,
-            lua_state_export_available,
-            auto_assemble_export_available,
-            script_runtime_ready,
-        ) = runtime::app_state()
-            .map(|app| {
-                (
-                    app.dispatcher_mode(),
-                    app.dispatcher_available(),
-                    app.config().dispatch_timeout_ms,
-                    app.config().console_log_enabled,
-                    app.lua_state_export_available(),
-                    app.auto_assemble_export_available(),
-                    app.script_runtime_ready(),
-                )
-            })
-            .unwrap_or(("uninitialized", false, 0, false, false, false, false));
+    match method {
+        "initialize" => handle_initialize(ctx),
+        "notifications/initialized" => handle_initialized_notification(),
+        "tools/list" => handle_tools_list(),
+        "tools/call" => handle_tools_call(params_json),
+        "ping" => handle_ping(ctx),
+        _ => ToolResponse {
+            success: false,
+            body_json: format!("method not found: {}", method),
+        },
+    }
+}
 
+fn handle_initialize(ctx: &McpContext<'_>) -> ToolResponse {
+    ToolResponse {
+        success: true,
+        body_json: json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {
+                    "listChanged": false
+                }
+            },
+            "serverInfo": {
+                "name": runtime::app_state()
+                    .map(|app| app.config().server_name.clone())
+                    .unwrap_or_else(|| "ce_plugin".to_owned()),
+                "version": runtime::app_state()
+                    .map(|app| app.config().server_version.clone())
+                    .unwrap_or_else(crate::runtime::build_version),
+            },
+            "transport": "http",
+            "plugin_id": ctx.plugin_id,
+            "bind_addr": ctx.bind_addr,
+        })
+        .to_string(),
+    }
+}
+
+fn handle_initialized_notification() -> ToolResponse {
+    ToolResponse {
+        success: true,
+        body_json: json!({}).to_string(),
+    }
+}
+
+fn handle_tools_list() -> ToolResponse {
+    let tools_payload = tools::all_tools()
+        .iter()
+        .map(|tool| {
+            let input_schema = serde_json::from_str::<Value>(tool.input_schema_json)
+                .unwrap_or_else(|_| json!({ "type": "object", "additionalProperties": true }));
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": input_schema,
+                "deprecated": tool.deprecated,
+                "annotations": {
+                    "category": tool.category,
+                    "requiresSerializedDispatch": tool.requires_serialized_dispatch,
+                    "aliases": tool.aliases,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    ToolResponse {
+        success: true,
+        body_json: json!({ "tools": tools_payload }).to_string(),
+    }
+}
+
+fn handle_tools_call(params_json: &str) -> ToolResponse {
+    let params = match serde_json::from_str::<ToolsCallParams>(params_json) {
+        Ok(params) => params,
+        Err(error) => {
+            return ToolResponse {
+                success: false,
+                body_json: format!("invalid params json: {}", error),
+            }
+        }
+    };
+
+    let tool_name = tools::canonical_name(params.name.as_str()).to_owned();
+    let Some(_spec) = tools::find_tool(tool_name.as_str()) else {
         return ToolResponse {
+            success: false,
+            body_json: format!("method not found: {}", tool_name),
+        };
+    };
+
+    let arguments = params.arguments.unwrap_or_else(|| json!({}));
+    let arguments_json = if arguments.is_null() {
+        "{}".to_owned()
+    } else {
+        arguments.to_string()
+    };
+
+    let response = if let Some(app) = runtime::app_state() {
+        app.dispatch_tool(tool_name.as_str(), arguments_json.as_str())
+    } else {
+        tools::dispatch(tool_name.as_str(), arguments_json.as_str())
+    };
+
+    if response.success {
+        let structured = serde_json::from_str::<Value>(&response.body_json)
+            .unwrap_or_else(|_| json!({ "raw": response.body_json.clone() }));
+        ToolResponse {
             success: true,
             body_json: json!({
-                "success": true,
-                "message": "pong",
-                "plugin_id": ctx.plugin_id,
-                "bind_addr": ctx.bind_addr,
-                "transport": "http",
-                "build_version": crate::runtime::build_version(),
-                "dispatcher_mode": dispatcher_mode,
-                "dispatcher_available": dispatcher_available,
-                "dispatch_timeout_ms": dispatch_timeout_ms,
-                "console_log_enabled": console_log_enabled,
-                "lua_state_export_available": lua_state_export_available,
-                "auto_assemble_export_available": auto_assemble_export_available,
-                "script_runtime_ready": script_runtime_ready
+                "tool": tool_name,
+                "isError": false,
+                "structuredContent": structured,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": response.body_json,
+                    }
+                ]
             })
             .to_string(),
-        };
+        }
+    } else {
+        response
     }
+}
 
-    if let Some(app) = runtime::app_state() {
-        return app.dispatch_tool(method, params_json);
+fn handle_ping(ctx: &McpContext<'_>) -> ToolResponse {
+    let (
+        dispatcher_mode,
+        dispatcher_available,
+        dispatch_timeout_ms,
+        console_log_enabled,
+        lua_state_export_available,
+        auto_assemble_export_available,
+        script_runtime_ready,
+    ) = runtime::app_state()
+        .map(|app| {
+            (
+                app.dispatcher_mode(),
+                app.dispatcher_available(),
+                app.config().dispatch_timeout_ms,
+                app.config().console_log_enabled,
+                app.lua_state_export_available(),
+                app.auto_assemble_export_available(),
+                app.script_runtime_ready(),
+            )
+        })
+        .unwrap_or(("uninitialized", false, 0, false, false, false, false));
+
+    ToolResponse {
+        success: true,
+        body_json: json!({
+            "success": true,
+            "message": "pong",
+            "plugin_id": ctx.plugin_id,
+            "bind_addr": ctx.bind_addr,
+            "transport": "http",
+            "build_version": crate::runtime::build_version(),
+            "dispatcher_mode": dispatcher_mode,
+            "dispatcher_available": dispatcher_available,
+            "dispatch_timeout_ms": dispatch_timeout_ms,
+            "console_log_enabled": console_log_enabled,
+            "lua_state_export_available": lua_state_export_available,
+            "auto_assemble_export_available": auto_assemble_export_available,
+            "script_runtime_ready": script_runtime_ready
+        })
+        .to_string(),
     }
-
-    tools::dispatch(method, params_json)
 }
 
 fn map_tool_error(error: &str) -> (i32, String) {
