@@ -24,6 +24,15 @@ pub(crate) struct ModuleInfo {
 
 static APP_STATE: OnceLock<Arc<AppState>> = OnceLock::new();
 
+pub fn build_version() -> String {
+    match option_env!("CE_PLUGIN_GIT_SHA") {
+        Some(sha) if !sha.is_empty() && sha != "nogit" => {
+            format!("{}+{}", env!("CARGO_PKG_VERSION"), sha)
+        }
+        _ => env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
 pub fn init_runtime(plugin_id: i32, exported_functions: *const ExportedFunctions) {
     let Some(exported_functions) =
         (unsafe { ExportedFunctions::read_from_ptr(exported_functions) })
@@ -37,8 +46,12 @@ pub fn init_runtime(plugin_id: i32, exported_functions: *const ExportedFunctions
     let config = RuntimeConfig::load();
     console::initialize(config.console_log_enabled, config.console_title.as_str());
     console::info(format!(
-        "插件启动中: plugin_id={} 监听地址={} allow_remote={} 超时={}ms",
-        plugin_id, config.bind_addr, config.allow_remote, config.dispatch_timeout_ms
+        "插件启动中: version={} plugin_id={} 监听地址={} allow_remote={} 超时={}ms",
+        build_version(),
+        plugin_id,
+        config.bind_addr,
+        config.allow_remote,
+        config.dispatch_timeout_ms
     ));
     let dispatcher = MainThreadDispatcher::new();
     let server = StreamableHttpServer::new(config.bind_addr.clone(), config.allow_remote);

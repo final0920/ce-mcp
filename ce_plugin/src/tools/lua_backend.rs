@@ -38,7 +38,8 @@ pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
 
 pub fn call_lua_tool(method: &str, params_json: &str) -> ToolResponse {
     console::info(format!(
-        "[lua_backend] step=enter method={} params_len={} in_main_thread_dispatch={}",
+        "[lua_backend] step=enter version={} method={} params_len={} in_main_thread_dispatch={}",
+        crate::runtime::build_version(),
         method,
         params_json.len(),
         in_main_thread_dispatch()

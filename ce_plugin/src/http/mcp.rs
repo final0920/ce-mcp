@@ -20,8 +20,10 @@ struct JsonRpcRequest {
 
 pub fn bootstrap(plugin_id: i32, bind_addr: &str) -> String {
     format!(
-        "{{\"status\":\"bootstrapped\",\"plugin_id\":{},\"bind_addr\":\"{}\"}}",
-        plugin_id, bind_addr
+        "{{\"status\":\"bootstrapped\",\"plugin_id\":{},\"bind_addr\":\"{}\",\"build_version\":\"{}\"}}",
+        plugin_id,
+        bind_addr,
+        crate::runtime::build_version()
     )
 }
 
@@ -47,9 +49,10 @@ pub fn health_payload(ctx: &McpContext<'_>) -> String {
         .unwrap_or(("uninitialized", false, 0, false, false, false));
 
     format!(
-        "{{\"status\":\"ok\",\"plugin_id\":{},\"bind_addr\":\"{}\",\"transport\":\"http\",\"dispatcher_mode\":\"{}\",\"dispatcher_available\":{},\"dispatch_timeout_ms\":{},\"console_log_enabled\":{},\"lua_state_export_available\":{},\"script_runtime_ready\":{},\"supported_ce_versions\":[\"7.5-x64\",\"7.6-x64\"]}}",
+        "{{\"status\":\"ok\",\"plugin_id\":{},\"bind_addr\":\"{}\",\"transport\":\"http\",\"build_version\":\"{}\",\"dispatcher_mode\":\"{}\",\"dispatcher_available\":{},\"dispatch_timeout_ms\":{},\"console_log_enabled\":{},\"lua_state_export_available\":{},\"script_runtime_ready\":{},\"supported_ce_versions\":[\"7.5-x64\",\"7.6-x64\"]}}",
         ctx.plugin_id,
         ctx.bind_addr,
+        crate::runtime::build_version(),
         dispatcher_mode,
         dispatcher_available,
         dispatch_timeout_ms,
@@ -142,6 +145,7 @@ fn dispatch_method(method: &str, params_json: &str, ctx: &McpContext<'_>) -> Too
                 "plugin_id": ctx.plugin_id,
                 "bind_addr": ctx.bind_addr,
                 "transport": "http",
+                "build_version": crate::runtime::build_version(),
                 "dispatcher_mode": dispatcher_mode,
                 "dispatcher_available": dispatcher_available,
                 "dispatch_timeout_ms": dispatch_timeout_ms,
