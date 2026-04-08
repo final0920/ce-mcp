@@ -11,7 +11,6 @@ use super::{in_main_thread_dispatch, lua_host, util, ToolResponse};
 pub(crate) const INTERNAL_DISPATCH_METHOD: &str = "__ce_mcp_call_lua_backend";
 
 const LUA_BACKEND_SENTINEL: &str = "__ce_mcp_rust_backend";
-const LUA_BACKEND_DISPATCH: &str = "__ce_mcp_rust_dispatch_json";
 const LUA_BACKEND_RUNTIME_STATUS: &str = "__ce_mcp_embedded_runtime_status_json";
 const LUA_BACKEND_RUNTIME_START: &str = "__ce_mcp_embedded_runtime_start_json";
 const LUA_BACKEND_TRANSPORT_SUBMIT: &str = "__ce_mcp_embedded_transport_submit_json";
@@ -252,9 +251,13 @@ fn current_dispatch_timeout() -> Duration {
 }
 
 fn should_retry_after_rebootstrap(error: &str) -> bool {
-    error.contains(LUA_BACKEND_DISPATCH)
+    error.contains(LUA_BACKEND_RUNTIME_STATUS)
+        || error.contains(LUA_BACKEND_RUNTIME_START)
+        || error.contains(LUA_BACKEND_TRANSPORT_SUBMIT)
+        || error.contains(LUA_BACKEND_TRANSPORT_STEP)
+        || error.contains(LUA_BACKEND_TRANSPORT_RECV)
         || error.contains("attempt to call a nil value")
-        || error.contains("lua backend dispatch returned non-string result")
+        || error.contains("returned non-string result")
 }
 
 fn mark_backend_unbootstrapped() -> Result<(), String> {
@@ -379,7 +382,6 @@ fn bootstrap_chunk() -> &'static str {
 fn build_bootstrap_chunk() -> String {
     let embedded_source = lua::bootstrap_source();
     let sentinel = json_string_literal(LUA_BACKEND_SENTINEL);
-    let dispatch = json_string_literal(LUA_BACKEND_DISPATCH);
     let runtime_status = json_string_literal(LUA_BACKEND_RUNTIME_STATUS);
     let runtime_start = json_string_literal(LUA_BACKEND_RUNTIME_START);
     let transport_submit = json_string_literal(LUA_BACKEND_TRANSPORT_SUBMIT);
@@ -393,7 +395,6 @@ fn build_bootstrap_chunk() -> String {
         r#"
 local existing_backend = _G[{sentinel}]
 if type(existing_backend) == "table"
-   and type(_G[{dispatch}]) == "function"
    and type(_G[{runtime_status}]) == "function"
    and type(_G[{runtime_start}]) == "function"
    and type(_G[{transport_submit}]) == "function"
@@ -413,7 +414,6 @@ _G[{sentinel}] = {{
     source = {source},
     cleanup = cleanupZombieState,
 }}
-_G[{dispatch}] = dispatch
 
 if type(_G[{runtime_start}]) == "function" then
     pcall(_G[{runtime_start}], '{{"reason":"rust-bootstrap"}}')
@@ -469,16 +469,13 @@ fn ensure_success(function_name: &str, body: &Value) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_bootstrap_chunk, INTERNAL_DISPATCH_METHOD, LUA_BACKEND_DISPATCH,
-        LUA_BACKEND_TRANSPORT_SUBMIT,
-    };
+    use super::{build_bootstrap_chunk, INTERNAL_DISPATCH_METHOD, LUA_BACKEND_TRANSPORT_SUBMIT};
 
     #[test]
-    fn bootstrap_chunk_exports_dispatch_function() {
+    fn bootstrap_chunk_exports_transport_runtime_functions() {
         let chunk = build_bootstrap_chunk();
-        assert!(chunk.contains(LUA_BACKEND_DISPATCH));
         assert!(chunk.contains(LUA_BACKEND_TRANSPORT_SUBMIT));
+        assert!(chunk.contains("__ce_mcp_embedded_runtime_start_json"));
         assert!(chunk.contains("embedded:ce_plugin/src/lua"));
         assert!(chunk.contains("cleanupZombieState"));
         assert!(!chunk.contains("StartMCPBridge()"));
