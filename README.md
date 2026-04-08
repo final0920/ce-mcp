@@ -24,6 +24,7 @@ The official delivery model remains **one `ce_plugin.dll`**. Version 0.3.0 is a 
 - Historical compatibility debt is not part of the 0.3.0 target
 - Legacy Lua materials are reference material only, not a product contract
 - External versioning follows `ce_plugin/Cargo.toml` and this README
+- Canonical integration note: [docs/integration-0.3.0.md](./docs/integration-0.3.0.md)
 
 ## Overview
 
@@ -208,6 +209,8 @@ Supported config filenames:
 - `ce_plugin.json`
 - `ce_plugin.config.json`
 
+Example config file: [`examples/ce_plugin.example.json`](./examples/ce_plugin.example.json)
+
 Example:
 ```json
 {
@@ -229,6 +232,8 @@ Example:
 
 `0.0.0.0` or public bind targets require `auth.enabled=true` and a non-empty bearer token.
 
+For the full client-facing integration path, handshake sequence, and clean-rewrite non-goals, see [docs/integration-0.3.0.md](./docs/integration-0.3.0.md).
+
 ## Project Layout
 
 ```text
@@ -240,7 +245,9 @@ ce-mcp/
 └─ LICENSE
 ```
 
-Additional migration note: `../docs/phase1-migration-notes.md`
+Additional integration notes:
+- English: [docs/integration-0.3.0.md](./docs/integration-0.3.0.md)
+- 中文: [docs/integration-0.3.0.zh-CN.md](./docs/integration-0.3.0.zh-CN.md)
 
 ## License
 

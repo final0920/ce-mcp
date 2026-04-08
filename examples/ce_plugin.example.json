@@ -1,0 +1,15 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 18765
+  },
+  "auth": {
+    "enabled": false,
+    "token": ""
+  },
+  "runtime": {
+    "dispatch_timeout_ms": 5000,
+    "console_log_enabled": true,
+    "console_title": "Flowing Cloud MCP Plugin"
+  }
+}

@@ -24,6 +24,7 @@
 - 历史兼容债务不再纳入 0.3.0 正式目标
 - 旧 Lua 材料只保留为参考，不再作为产品契约
 - 对外版本口径以 `ce_plugin/Cargo.toml` 与本 README 为准
+- 正式接入说明：[`docs/integration-0.3.0.zh-CN.md`](./docs/integration-0.3.0.zh-CN.md)
 
 ## 项目定位
 
@@ -208,6 +209,8 @@ ce_plugin/target/release/ce_plugin.dll
 - `ce_plugin.json`
 - `ce_plugin.config.json`
 
+示例配置文件：[`examples/ce_plugin.example.json`](./examples/ce_plugin.example.json)
+
 示例：
 ```json
 {
@@ -229,6 +232,8 @@ ce_plugin/target/release/ce_plugin.dll
 
 当监听 `0.0.0.0` 或公网地址时，必须启用 `auth.enabled=true` 且提供非空 Bearer Token。
 
+完整接入流程、握手顺序和 clean rewrite 非目标，请看 [`docs/integration-0.3.0.zh-CN.md`](./docs/integration-0.3.0.zh-CN.md)。
+
 ## 项目结构
 
 ```text
@@ -240,7 +245,9 @@ ce-mcp/
 └─ LICENSE
 ```
 
-补充迁移说明：`../docs/phase1-migration-notes.md`
+补充接入说明：
+- English: [docs/integration-0.3.0.md](./docs/integration-0.3.0.md)
+- 中文: [docs/integration-0.3.0.zh-CN.md](./docs/integration-0.3.0.zh-CN.md)
 
 ## 许可证
 
