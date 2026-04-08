@@ -36,25 +36,9 @@ pub fn supported_methods() -> &'static [&'static str] {
 }
 
 pub(crate) fn current_modules() -> Vec<runtime::ModuleInfo> {
-    // 主路径优先走 CE/Lua 后端，避免把 Toolhelp32 枚举重新扩散回业务层。
-    match lua_modules_from_backend() {
-        Ok(modules) => modules,
-        Err(_) => native_current_modules(),
-    }
-}
-
-fn native_current_modules() -> Vec<runtime::ModuleInfo> {
-    // 这里只保留宿主侧兜底：当 Lua 后端不可用时，用 Toolhelp32 给地址归一化/线程工具提供最小模块视图。
-    let Some(app) = runtime::app_state() else {
-        return Vec::new();
-    };
-
-    let process_id = app.opened_process_id().unwrap_or(0);
-    if process_id == 0 {
-        return Vec::new();
-    }
-
-    runtime::enum_modules(process_id).unwrap_or_default()
+    // 模块视图现在只来自 embedded Lua/CE backend；
+    // 不再回退 Toolhelp32，避免宿主快照边界重新扩散回调用侧。
+    lua_modules_from_backend().unwrap_or_default()
 }
 
 fn ping() -> ToolResponse {
@@ -115,12 +99,20 @@ fn unattached_process_info_body() -> Value {
     })
 }
 
-fn lua_process_attached() -> Result<bool, ToolResponse> {
+fn lua_current_process_id() -> Result<u32, ToolResponse> {
     match call_lua_json_tool("get_process_info", "{}") {
-        Ok(body) => Ok(body.get("process_id").and_then(Value::as_u64).unwrap_or(0) != 0),
-        Err(response) if is_no_process_attached_response(&response) => Ok(false),
+        Ok(body) => Ok(body
+            .get("process_id")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)),
+        Err(response) if is_no_process_attached_response(&response) => Ok(0),
         Err(response) => Err(response),
     }
+}
+
+fn lua_process_attached() -> Result<bool, ToolResponse> {
+    lua_current_process_id().map(|process_id| process_id != 0)
 }
 
 fn lua_module_from_value(value: &Value) -> Option<runtime::ModuleInfo> {
@@ -143,6 +135,32 @@ fn lua_module_from_value(value: &Value) -> Option<runtime::ModuleInfo> {
             .unwrap_or_default()
             .to_owned(),
     })
+}
+
+fn lua_thread_info_json(value: &Value, process_id: u32) -> Option<Value> {
+    let thread_id = value
+        .get("thread_id")
+        .and_then(Value::as_u64)
+        .or_else(|| value.get("id_int").and_then(Value::as_u64))
+        .or_else(|| {
+            value
+                .get("id_hex")
+                .and_then(Value::as_str)
+                .and_then(|text| {
+                    let trimmed = text
+                        .strip_prefix("0x")
+                        .or_else(|| text.strip_prefix("0X"))
+                        .unwrap_or(text);
+                    u32::from_str_radix(trimmed, 16).ok()
+                })
+                .map(u64::from)
+        })
+        .and_then(|value| u32::try_from(value).ok())?;
+
+    Some(json!({
+        "thread_id": thread_id,
+        "owner_process_id": process_id,
+    }))
 }
 
 fn enrich_lua_modules_in_place(body: &mut Value) -> Vec<runtime::ModuleInfo> {
@@ -272,14 +290,11 @@ fn enum_modules() -> ToolResponse {
 }
 
 fn get_thread_list() -> ToolResponse {
-    let Some(app) = runtime::app_state() else {
-        return ToolResponse {
-            success: false,
-            body_json: "runtime not initialized".to_owned(),
-        };
+    let process_id = match lua_current_process_id() {
+        Ok(process_id) => process_id,
+        Err(response) => return response,
     };
 
-    let process_id = app.opened_process_id().unwrap_or(0);
     if process_id == 0 {
         return ToolResponse {
             success: true,
@@ -293,23 +308,35 @@ fn get_thread_list() -> ToolResponse {
         };
     }
 
-    match runtime::enum_threads(process_id) {
-        Ok(threads) => ToolResponse {
-            success: true,
-            body_json: json!({
-                "success": true,
-                "count": threads.len(),
-                "threads": threads.into_iter().map(|thread| json!({
-                    "thread_id": thread.thread_id,
-                    "owner_process_id": thread.owner_process_id,
-                })).collect::<Vec<_>>(),
-            })
-            .to_string(),
-        },
-        Err(error) => ToolResponse {
-            success: false,
-            body_json: error,
-        },
+    let mut body = match call_lua_json_tool("get_thread_list", "{}") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
+    let threads = body
+        .get("threads")
+        .and_then(Value::as_array)
+        .map(|threads| {
+            threads
+                .iter()
+                .filter_map(|thread| lua_thread_info_json(thread, process_id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let Some(object) = body.as_object_mut() else {
+        return error_response("lua get_thread_list returned non-object body".to_owned());
+    };
+
+    object.insert("success".to_owned(), Value::Bool(true));
+    object.insert("count".to_owned(), json!(threads.len()));
+    object.insert("attached".to_owned(), Value::Bool(true));
+    object.insert("resolver".to_owned(), json!("ce_getThreadlist"));
+    object.insert("threads".to_owned(), Value::Array(threads));
+
+    ToolResponse {
+        success: true,
+        body_json: body.to_string(),
     }
 }
 
@@ -524,12 +551,12 @@ fn normalize_address(params_json: &str) -> ToolResponse {
 }
 
 fn get_rtti_classname(params_json: &str) -> ToolResponse {
-    let Some(app) = runtime::app_state() else {
+    if runtime::app_state().is_none() {
         return ToolResponse {
             success: false,
             body_json: "runtime not initialized".to_owned(),
         };
-    };
+    }
     let params = match util::parse_params(params_json) {
         Ok(value) => value,
         Err(error) => return error_response(error),
@@ -541,74 +568,12 @@ fn get_rtti_classname(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    let lua_result = lua_rtti_classname(address, &modules);
-    if let Ok(body) = &lua_result {
-        if body.get("found").and_then(Value::as_bool).unwrap_or(false) {
-            return ToolResponse {
-                success: true,
-                body_json: body.to_string(),
-            };
-        }
-    }
-
-    let Some(handle) = app.opened_process_handle() else {
-        return match lua_result {
-            Ok(body) => ToolResponse {
-                success: true,
-                body_json: body.to_string(),
-            },
-            Err(error) => error_response(format!(
-                "process handle unavailable and lua RTTI lookup failed: {}",
-                error
-            )),
-        };
-    };
-
-    match resolve_rtti_classname_native(handle, address, &modules) {
-        Ok(Some(result)) => ToolResponse {
+    match lua_rtti_classname(address, &modules) {
+        Ok(body) => ToolResponse {
             success: true,
-            body_json: json!({
-                "success": true,
-                "address": util::format_address(address),
-                "normalized_address": addressing::normalize_address_from_modules(address, &modules),
-                "class_name": result.class_name,
-                "decorated_name": result.decorated_name,
-                "found": true,
-                "rtti_module": result.module_name,
-                "resolver": "msvc_x64_rtti_fallback",
-            })
-            .to_string(),
+            body_json: body.to_string(),
         },
-        Ok(None) => match lua_result {
-            Ok(body) => ToolResponse {
-                success: true,
-                body_json: body.to_string(),
-            },
-            Err(_) => ToolResponse {
-                success: true,
-                body_json: json!({
-                    "success": true,
-                    "address": util::format_address(address),
-                    "normalized_address": addressing::normalize_address_from_modules(address, &modules),
-                    "class_name": Value::Null,
-                    "decorated_name": Value::Null,
-                    "found": false,
-                    "rtti_module": Value::Null,
-                    "resolver": "msvc_x64_rtti_fallback",
-                    "note": "No RTTI information found at this address",
-                })
-                .to_string(),
-            },
-        },
-        Err(error) => match lua_result {
-            Ok(body) => ToolResponse {
-                success: true,
-                body_json: body.to_string(),
-            },
-            Err(lua_error) => {
-                error_response(format!("lua RTTI lookup failed: {}; native fallback failed: {}", lua_error, error))
-            }
-        },
+        Err(error) => error_response(format!("lua RTTI lookup failed: {}", error)),
     }
 }
 
@@ -727,12 +692,6 @@ pub(crate) fn find_module_for_address<'a>(
     })
 }
 
-struct RttiClassResult {
-    class_name: String,
-    decorated_name: String,
-    module_name: Option<String>,
-}
-
 fn lua_rtti_classname(address: usize, modules: &[runtime::ModuleInfo]) -> Result<Value, String> {
     let mut body = call_lua_json_tool(
         "get_rtti_classname",
@@ -760,102 +719,6 @@ fn lua_rtti_classname(address: usize, modules: &[runtime::ModuleInfo]) -> Result
         .or_insert(json!("ce_getRTTIClassName"));
 
     Ok(body)
-}
-
-fn resolve_rtti_classname_native(
-    handle: *mut core::ffi::c_void,
-    object_address: usize,
-    modules: &[runtime::ModuleInfo],
-) -> Result<Option<RttiClassResult>, String> {
-    let vftable = match read_u64(handle, object_address) {
-        Ok(value) => value as usize,
-        Err(_) => return Ok(None),
-    };
-    if vftable < 8 {
-        return Ok(None);
-    }
-
-    let col_address = match read_u64(handle, vftable.saturating_sub(8)) {
-        Ok(value) => value as usize,
-        Err(_) => return Ok(None),
-    };
-    if col_address == 0 {
-        return Ok(None);
-    }
-
-    let col = match runtime::read_process_memory(handle, col_address, 24) {
-        Ok(bytes) if bytes.len() == 24 => bytes,
-        _ => return Ok(None),
-    };
-
-    let type_desc_rva = u32::from_le_bytes(col[12..16].try_into().unwrap_or([0; 4])) as usize;
-    let self_rva = u32::from_le_bytes(col[20..24].try_into().unwrap_or([0; 4])) as usize;
-    if type_desc_rva == 0 || self_rva == 0 || self_rva > col_address {
-        return Ok(None);
-    }
-
-    let image_base = col_address.saturating_sub(self_rva);
-    let type_desc_address = image_base.saturating_add(type_desc_rva);
-    let decorated_name = match read_c_string(handle, type_desc_address.saturating_add(16), 256) {
-        Some(name) if !name.is_empty() => name,
-        _ => return Ok(None),
-    };
-    let class_name =
-        demangle_msvc_type_name(&decorated_name).unwrap_or_else(|| decorated_name.clone());
-    let module_name =
-        find_module_for_address(image_base, modules).map(|module| module.name.clone());
-
-    Ok(Some(RttiClassResult {
-        class_name,
-        decorated_name,
-        module_name,
-    }))
-}
-
-fn read_u64(handle: *mut core::ffi::c_void, address: usize) -> Result<u64, String> {
-    let bytes = runtime::read_process_memory(handle, address, 8)?;
-    let array: [u8; 8] = bytes
-        .try_into()
-        .map_err(|_| "unexpected read length for u64".to_owned())?;
-    Ok(u64::from_le_bytes(array))
-}
-
-fn read_c_string(
-    handle: *mut core::ffi::c_void,
-    address: usize,
-    max_length: usize,
-) -> Option<String> {
-    let mut size = max_length.min(256);
-    while size >= 32 {
-        if let Ok(bytes) = runtime::read_process_memory(handle, address, size) {
-            let end = bytes
-                .iter()
-                .position(|byte| *byte == 0)
-                .unwrap_or(bytes.len());
-            if end > 0 {
-                return Some(String::from_utf8_lossy(&bytes[..end]).to_string());
-            }
-        }
-        size /= 2;
-    }
-    None
-}
-
-fn demangle_msvc_type_name(name: &str) -> Option<String> {
-    let stripped = name
-        .strip_prefix(".?AV")
-        .or_else(|| name.strip_prefix(".?AU"))
-        .or_else(|| name.strip_prefix(".?AW"))?;
-    let body = stripped.strip_suffix("@@").unwrap_or(stripped);
-    let mut parts = body
-        .split('@')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return None;
-    }
-    parts.reverse();
-    Some(parts.join("::"))
 }
 
 fn error_response(message: String) -> ToolResponse {

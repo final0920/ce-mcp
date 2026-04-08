@@ -54,29 +54,6 @@ impl AppState {
         &self.config
     }
 
-    pub fn opened_process_id(&self) -> Option<u32> {
-        let raw = self.exported_functions.opened_process_id;
-        if raw.is_null() {
-            return None;
-        }
-
-        Some(unsafe { *raw })
-    }
-
-    pub fn opened_process_handle(&self) -> Option<*mut c_void> {
-        let raw = self.exported_functions.opened_process_handle;
-        if raw.is_null() {
-            return None;
-        }
-
-        let handle = unsafe { *raw };
-        if handle.is_null() {
-            return None;
-        }
-
-        Some(handle)
-    }
-
     pub fn main_window_handle(&self) -> Option<*mut c_void> {
         let callback = self.exported_functions.get_main_window_handle?;
         let handle = unsafe { callback() };

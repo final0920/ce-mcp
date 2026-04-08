@@ -1,5 +1,3 @@
-use core::ffi::c_void;
-
 use serde_json::{json, Value};
 
 use super::{addressing, lua_backend, process, util, ToolResponse};
@@ -285,9 +283,6 @@ fn read_pointer_chain(params_json: &str) -> ToolResponse {
 }
 
 fn write_memory(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
-    };
     let params = match util::parse_params(params_json) {
         Ok(value) => value,
         Err(error) => return error_response(error),
@@ -296,39 +291,24 @@ fn write_memory(params_json: &str) -> ToolResponse {
         Ok(address) => address,
         Err(error) => return error_response(error),
     };
-    let bytes = match params.get("bytes").and_then(Value::as_array) {
-        Some(values) => {
-            let mut output = Vec::with_capacity(values.len());
-            for value in values {
-                let number = match value.as_u64() {
-                    Some(number) if number <= 0xFF => number as u8,
-                    _ => return error_response("bytes must be an array of 0..255".to_owned()),
-                };
-                output.push(number);
-            }
-            output
-        }
-        None => return error_response("missing bytes".to_owned()),
+    let bytes = match parse_byte_array(params.get("bytes")) {
+        Ok(bytes) => bytes,
+        Err(error) => return error_response(error),
     };
 
-    match runtime::write_process_memory(handle, address, &bytes) {
-        Ok(()) => ToolResponse {
-            success: true,
-            body_json: json!({
-                "success": true,
-                "address": util::format_address(address),
-                "size": bytes.len(),
-            })
-            .to_string(),
-        },
-        Err(error) => error_response(error),
+    let mut body = match write_bytes_via_lua(address, &bytes) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+
+    if let Err(error) = enrich_write_memory_response(&mut body, address, bytes.len()) {
+        return error_response(error);
     }
+
+    success_response(body)
 }
 
 fn write_integer(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
-    };
     let params = match util::parse_params(params_json) {
         Ok(value) => value,
         Err(error) => return error_response(error),
@@ -340,9 +320,10 @@ fn write_integer(params_json: &str) -> ToolResponse {
     let integer_type = params
         .get("type")
         .and_then(Value::as_str)
-        .unwrap_or("dword");
+        .unwrap_or("dword")
+        .to_owned();
 
-    let bytes = match integer_type {
+    let bytes = match integer_type.as_str() {
         "byte" => one_u8(params.get("value")).map(|value| vec![value]),
         "word" => one_u16(params.get("value")).map(|value| value.to_le_bytes().to_vec()),
         "dword" => one_u32(params.get("value")).map(|value| value.to_le_bytes().to_vec()),
@@ -356,25 +337,43 @@ fn write_integer(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    match runtime::write_process_memory(handle, address, &bytes) {
-        Ok(()) => ToolResponse {
-            success: true,
-            body_json: json!({
-                "success": true,
-                "address": util::format_address(address),
-                "size": bytes.len(),
-                "type": integer_type,
-            })
-            .to_string(),
-        },
-        Err(error) => error_response(error),
+    let mut body = match write_bytes_via_lua(address, &bytes) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+
+    if let Err(error) = enrich_write_memory_response(&mut body, address, bytes.len()) {
+        return error_response(error);
     }
+
+    let Some(object) = body.as_object_mut() else {
+        return error_response("lua write_memory returned non-object body".to_owned());
+    };
+
+    object.insert("type".to_owned(), Value::String(integer_type.clone()));
+    if integer_type == "qword" {
+        if let Some(value) = response_u64(params.get("value")) {
+            object.insert(
+                "value".to_owned(),
+                Value::String(util::format_u64_hex(value)),
+            );
+            object.insert("value_decimal".to_owned(), Value::String(value.to_string()));
+        }
+    } else if let Some(value) = params.get("value").cloned() {
+        object.insert("value".to_owned(), value);
+    }
+    if let Some(hex) = normalized_integer_hex(integer_type.as_str(), params.get("value")) {
+        object.insert("hex".to_owned(), Value::String(hex));
+    }
+    object.insert(
+        "write_path".to_owned(),
+        Value::String("embedded_lua.write_memory".to_owned()),
+    );
+
+    success_response(body)
 }
 
 fn write_string(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
-    };
     let params = match util::parse_params(params_json) {
         Ok(value) => value,
         Err(error) => return error_response(error),
@@ -383,7 +382,11 @@ fn write_string(params_json: &str) -> ToolResponse {
         Ok(address) => address,
         Err(error) => return error_response(error),
     };
-    let value = match params.get("value").and_then(Value::as_str) {
+    let value = match params
+        .get("value")
+        .or_else(|| params.get("string"))
+        .and_then(Value::as_str)
+    {
         Some(value) => value,
         None => return error_response("missing string value".to_owned()),
     };
@@ -401,19 +404,86 @@ fn write_string(params_json: &str) -> ToolResponse {
         bytes
     };
 
-    match runtime::write_process_memory(handle, address, &bytes) {
-        Ok(()) => ToolResponse {
-            success: true,
-            body_json: json!({
-                "success": true,
-                "address": util::format_address(address),
-                "size": bytes.len(),
-                "wide": wide,
-            })
-            .to_string(),
-        },
-        Err(error) => error_response(error),
+    let mut body = match write_bytes_via_lua(address, &bytes) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+
+    if let Err(error) = enrich_write_memory_response(&mut body, address, bytes.len()) {
+        return error_response(error);
     }
+
+    let Some(object) = body.as_object_mut() else {
+        return error_response("lua write_memory returned non-object body".to_owned());
+    };
+
+    object.insert("wide".to_owned(), Value::Bool(wide));
+    object.insert("length".to_owned(), json!(value.len()));
+    object.insert(
+        "write_path".to_owned(),
+        Value::String("embedded_lua.write_memory".to_owned()),
+    );
+
+    success_response(body)
+}
+
+fn write_bytes_via_lua(address: usize, bytes: &[u8]) -> Result<Value, ToolResponse> {
+    let forwarded_params = json!({
+        "address": util::format_address(address),
+        "bytes": bytes,
+    })
+    .to_string();
+
+    call_lua_tool_json("write_memory", &forwarded_params)
+}
+
+fn enrich_write_memory_response(
+    body: &mut Value,
+    address: usize,
+    size: usize,
+) -> Result<(), String> {
+    let modules = process::current_modules();
+    let normalized_address = response_address(body.get("address"))
+        .or(Some(address))
+        .and_then(|value| normalize_address(value, &modules));
+
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| "lua write_memory returned non-object body".to_owned())?;
+
+    object
+        .entry("address".to_owned())
+        .or_insert_with(|| Value::String(util::format_address(address)));
+    object.insert("normalized_address".to_owned(), json!(normalized_address));
+    object
+        .entry("size".to_owned())
+        .or_insert_with(|| json!(size));
+    object
+        .entry("bytes_written".to_owned())
+        .or_insert_with(|| json!(size));
+
+    Ok(())
+}
+
+fn parse_byte_array(value: Option<&Value>) -> Result<Vec<u8>, String> {
+    let values = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing bytes".to_owned())?;
+
+    let mut output = Vec::with_capacity(values.len());
+    for value in values {
+        let number = match value.as_u64() {
+            Some(number) if number <= 0xFF => number as u8,
+            _ => return Err("bytes must be an array of 0..255".to_owned()),
+        };
+        output.push(number);
+    }
+
+    if output.is_empty() {
+        return Err("missing bytes".to_owned());
+    }
+
+    Ok(output)
 }
 
 fn call_lua_tool_json(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
@@ -526,10 +596,6 @@ fn normalize_pointer_chain_step(step: &Value, modules: &[runtime::ModuleInfo]) -
     Value::Object(object)
 }
 
-fn opened_process_handle() -> Option<*mut c_void> {
-    runtime::app_state().and_then(|app| app.opened_process_handle())
-}
-
 fn normalize_address(
     address: usize,
     modules: &[runtime::ModuleInfo],
@@ -544,13 +610,6 @@ fn normalize_pointer_value(
     usize::try_from(value)
         .ok()
         .and_then(|address| normalize_address(address, modules))
-}
-
-fn runtime_unavailable(message: &str) -> ToolResponse {
-    ToolResponse {
-        success: false,
-        body_json: message.to_owned(),
-    }
 }
 
 fn error_response(message: String) -> ToolResponse {

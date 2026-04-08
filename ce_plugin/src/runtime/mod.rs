@@ -2,7 +2,6 @@ mod app_state;
 mod config;
 pub mod console;
 mod dispatcher;
-mod winapi;
 
 use std::thread;
 use std::time::Duration;
@@ -14,10 +13,14 @@ use crate::http::server::StreamableHttpServer;
 use app_state::AppState;
 pub use config::RuntimeConfig;
 use dispatcher::MainThreadDispatcher;
-// 仅导出剩余仍在使用的宿主侧 WinAPI 兜底能力；scan 类高层能力与其旧 region helper 已完全移出此层。
-pub use winapi::{
-    enum_modules, enum_threads, read_process_memory, write_process_memory, ModuleInfo,
-};
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModuleInfo {
+    pub(crate) name: String,
+    pub(crate) base_address: usize,
+    pub(crate) size: u32,
+    pub(crate) path: String,
+}
 
 static APP_STATE: OnceLock<Arc<AppState>> = OnceLock::new();
 
