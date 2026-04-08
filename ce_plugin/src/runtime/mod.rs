@@ -72,10 +72,11 @@ pub fn init_runtime(plugin_id: i32, exported_functions: *const ExportedFunctions
             console::info("主窗口消息钩子调度已激活");
         }
         console::info(format!(
-            "运行模式: dispatcher_mode={} dispatcher_available={} lua_state_export_available={} script_runtime_ready={}",
+            "运行模式: dispatcher_mode={} dispatcher_available={} lua_state_export_available={} auto_assemble_export_available={} script_runtime_ready={}",
             app.dispatcher_mode(),
             app.dispatcher_available(),
             app.lua_state_export_available(),
+            app.auto_assemble_export_available(),
             app.script_runtime_ready()
         ));
         match app.start_http_server() {

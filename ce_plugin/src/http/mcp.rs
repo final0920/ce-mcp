@@ -34,6 +34,7 @@ pub fn health_payload(ctx: &McpContext<'_>) -> String {
         dispatch_timeout_ms,
         console_log_enabled,
         lua_state_export_available,
+        auto_assemble_export_available,
         script_runtime_ready,
     ) = runtime::app_state()
         .map(|app| {
@@ -43,13 +44,14 @@ pub fn health_payload(ctx: &McpContext<'_>) -> String {
                 app.config().dispatch_timeout_ms,
                 app.config().console_log_enabled,
                 app.lua_state_export_available(),
+                app.auto_assemble_export_available(),
                 app.script_runtime_ready(),
             )
         })
-        .unwrap_or(("uninitialized", false, 0, false, false, false));
+        .unwrap_or(("uninitialized", false, 0, false, false, false, false));
 
     format!(
-        "{{\"status\":\"ok\",\"plugin_id\":{},\"bind_addr\":\"{}\",\"transport\":\"http\",\"build_version\":\"{}\",\"dispatcher_mode\":\"{}\",\"dispatcher_available\":{},\"dispatch_timeout_ms\":{},\"console_log_enabled\":{},\"lua_state_export_available\":{},\"script_runtime_ready\":{},\"supported_ce_versions\":[\"7.5-x64\",\"7.6-x64\"]}}",
+        "{{\"status\":\"ok\",\"plugin_id\":{},\"bind_addr\":\"{}\",\"transport\":\"http\",\"build_version\":\"{}\",\"dispatcher_mode\":\"{}\",\"dispatcher_available\":{},\"dispatch_timeout_ms\":{},\"console_log_enabled\":{},\"lua_state_export_available\":{},\"auto_assemble_export_available\":{},\"script_runtime_ready\":{},\"supported_ce_versions\":[\"7.5-x64\",\"7.6-x64\"]}}",
         ctx.plugin_id,
         ctx.bind_addr,
         crate::runtime::build_version(),
@@ -58,6 +60,7 @@ pub fn health_payload(ctx: &McpContext<'_>) -> String {
         dispatch_timeout_ms,
         console_log_enabled,
         lua_state_export_available,
+        auto_assemble_export_available,
         script_runtime_ready
     )
 }
@@ -123,6 +126,7 @@ fn dispatch_method(method: &str, params_json: &str, ctx: &McpContext<'_>) -> Too
             dispatch_timeout_ms,
             console_log_enabled,
             lua_state_export_available,
+            auto_assemble_export_available,
             script_runtime_ready,
         ) = runtime::app_state()
             .map(|app| {
@@ -132,10 +136,11 @@ fn dispatch_method(method: &str, params_json: &str, ctx: &McpContext<'_>) -> Too
                     app.config().dispatch_timeout_ms,
                     app.config().console_log_enabled,
                     app.lua_state_export_available(),
+                    app.auto_assemble_export_available(),
                     app.script_runtime_ready(),
                 )
             })
-            .unwrap_or(("uninitialized", false, 0, false, false, false));
+            .unwrap_or(("uninitialized", false, 0, false, false, false, false));
 
         return ToolResponse {
             success: true,
@@ -151,6 +156,7 @@ fn dispatch_method(method: &str, params_json: &str, ctx: &McpContext<'_>) -> Too
                 "dispatch_timeout_ms": dispatch_timeout_ms,
                 "console_log_enabled": console_log_enabled,
                 "lua_state_export_available": lua_state_export_available,
+                "auto_assemble_export_available": auto_assemble_export_available,
                 "script_runtime_ready": script_runtime_ready
             })
             .to_string(),

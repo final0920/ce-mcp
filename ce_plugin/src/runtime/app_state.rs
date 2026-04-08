@@ -68,6 +68,10 @@ impl AppState {
         self.exported_functions.get_lua_state.is_some()
     }
 
+    pub fn auto_assemble_export_available(&self) -> bool {
+        self.exported_functions.auto_assemble.is_some()
+    }
+
     pub fn script_runtime_ready(&self) -> bool {
         self.dispatcher_mode() == "window-message-hook" && self.lua_state_export_available()
     }
