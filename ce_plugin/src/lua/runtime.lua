@@ -5,6 +5,8 @@
 
 local RAW_COMMAND_BRIDGE = createEmbeddedCommandBridge()
 
+local DEFAULT_PUMP_INTERVAL_MS = 25
+
 local function normalize_runtime_limit(limit)
     local numeric = tonumber(limit)
     if not numeric then
@@ -16,6 +18,21 @@ local function normalize_runtime_limit(limit)
     end
     if numeric > 128 then
         return 128
+    end
+    return numeric
+end
+
+local function normalize_pump_interval(interval)
+    local numeric = tonumber(interval)
+    if not numeric then
+        return DEFAULT_PUMP_INTERVAL_MS
+    end
+    numeric = math.floor(numeric)
+    if numeric < 1 then
+        return 1
+    end
+    if numeric > 1000 then
+        return 1000
     end
     return numeric
 end
@@ -34,10 +51,15 @@ local function createEmbeddedBackendRuntime(options)
             last_error = nil,
             last_dispatch_at = nil,
             last_response_id = nil,
+            last_pump_at = nil,
+            last_pump_processed = 0,
             stop_reason = nil,
             mode = options.mode or "embedded",
             created_at = os.time(),
             started_at = nil,
+            pump_interval_ms = normalize_pump_interval(options.pump_interval_ms),
+            auto_pump_available = type(createTimer) == "function",
+            auto_pump_enabled = false,
         }
     }
 
@@ -56,9 +78,64 @@ local function createEmbeddedBackendRuntime(options)
             last_error = self.state.last_error,
             last_dispatch_at = self.state.last_dispatch_at,
             last_response_id = self.state.last_response_id,
+            last_pump_at = self.state.last_pump_at,
+            last_pump_processed = self.state.last_pump_processed,
             stop_reason = self.state.stop_reason,
+            pump_interval_ms = self.state.pump_interval_ms,
+            auto_pump_available = self.state.auto_pump_available,
+            auto_pump_enabled = self.state.auto_pump_enabled,
             transport = transport_stats,
         }
+    end
+
+    function runtime:disable_auto_pump(reason)
+        if self._timer then
+            pcall(function() self._timer.destroy() end)
+            self._timer = nil
+        end
+        self.state.auto_pump_enabled = false
+        if reason then
+            self.state.last_error = reason
+        end
+    end
+
+    function runtime:enable_auto_pump()
+        if not self.state.auto_pump_available then
+            self.state.auto_pump_enabled = false
+            return false, "createTimer unavailable"
+        end
+        if self._timer then
+            self.state.auto_pump_enabled = true
+            return true
+        end
+
+        local ok, timer = pcall(function()
+            local t = createTimer(nil, false)
+            t.Interval = self.state.pump_interval_ms
+            t.OnTimer = function()
+                if not self.state.running then
+                    return
+                end
+                local result = self:drain(16)
+                self.state.last_pump_at = os.time()
+                self.state.last_pump_processed = result.processed or 0
+                if not result.success then
+                    self.state.last_error = result.error
+                end
+            end
+            t.Enabled = true
+            return t
+        end)
+
+        if not ok or not timer then
+            self.state.auto_pump_enabled = false
+            self.state.last_error = ok and "createTimer returned nil" or tostring(timer)
+            return false, self.state.last_error
+        end
+
+        self._timer = timer
+        self.state.auto_pump_enabled = true
+        return true
     end
 
     function runtime:start(config)
@@ -71,12 +148,21 @@ local function createEmbeddedBackendRuntime(options)
         self.state.stop_reason = nil
         self.state.started_at = os.time()
         self.state.config = type(config) == "table" and config or {}
+        self.state.pump_interval_ms = normalize_pump_interval(self.state.config.pump_interval_ms or self.state.pump_interval_ms)
+        if self._timer then
+            pcall(function() self._timer.Interval = self.state.pump_interval_ms end)
+        end
+        local ok, err = self:enable_auto_pump()
+        if not ok then
+            self.state.last_error = err
+        end
         return self:status()
     end
 
     function runtime:stop(reason)
         self.state.running = false
         self.state.stop_reason = reason or self.state.stop_reason or "stopped"
+        self:disable_auto_pump()
         return self:status()
     end
 
