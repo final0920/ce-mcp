@@ -17,6 +17,21 @@ local function queue_shift(queue)
     return value
 end
 
+local function queue_take_by_id(queue, expected_id)
+    if expected_id == nil or expected_id == "" then
+        return queue_shift(queue)
+    end
+
+    for index, value in ipairs(queue) do
+        if type(value) == "table" and value.id == expected_id then
+            table.remove(queue, index)
+            return value
+        end
+    end
+
+    return nil
+end
+
 local function createLoopbackTransport(options)
     options = type(options) == "table" and options or {}
 
@@ -104,8 +119,8 @@ local function createLoopbackTransport(options)
         return envelope
     end
 
-    function transport:pop_response()
-        return queue_shift(response_queue)
+    function transport:pop_response(expected_id)
+        return queue_take_by_id(response_queue, expected_id)
     end
 
     return transport

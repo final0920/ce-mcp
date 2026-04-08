@@ -333,11 +333,12 @@ fn recv_response_for_request(
             step.get("idle").and_then(Value::as_bool).unwrap_or(false)
         ));
 
+        let recv_payload = json!({ "id": request_id }).to_string();
         console::info(format!(
             "[lua_backend] step=transport_recv_begin function={} method={} request_id={} pump={}",
             LUA_BACKEND_TRANSPORT_RECV, method, request_id, pump
         ));
-        let recv = call_json_global(LUA_BACKEND_TRANSPORT_RECV, &[])?;
+        let recv = call_json_global(LUA_BACKEND_TRANSPORT_RECV, &[recv_payload.as_str()])?;
         ensure_success(LUA_BACKEND_TRANSPORT_RECV, &recv)?;
         console::info(format!(
             "[lua_backend] step=transport_recv_end method={} request_id={} pump={} idle={}",
@@ -362,9 +363,9 @@ fn recv_response_for_request(
             return Ok(response.clone());
         }
 
-        console::warn(format!(
-            "[lua_backend] step=transport_recv_skip method={} expected_id={} got_id={} pump={}",
-            method, request_id, response_id, pump
+        return Err(format!(
+            "lua backend transport response id mismatch after targeted recv: expected {}, got {}",
+            request_id, response_id
         ));
     }
 
