@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::runtime::console;
 use crate::{lua, runtime};
 
 use super::{in_main_thread_dispatch, script, util, ToolResponse};
@@ -30,6 +31,13 @@ pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
 }
 
 pub fn call_lua_tool(method: &str, params_json: &str) -> ToolResponse {
+    console::info(format!(
+        "[lua_backend] step=enter method={} params_len={} in_main_thread_dispatch={}",
+        method,
+        params_json.len(),
+        in_main_thread_dispatch()
+    ));
+
     if in_main_thread_dispatch() {
         return call_lua_tool_direct(method, params_json);
     }
@@ -39,11 +47,22 @@ pub fn call_lua_tool(method: &str, params_json: &str) -> ToolResponse {
         "params_json": params_json,
     });
 
-    util::dispatch_via_dispatcher(
+    let timeout = current_dispatch_timeout();
+    console::info(format!(
+        "[lua_backend] step=dispatch_via_dispatcher_begin method={} timeout_ms={}",
+        method,
+        timeout.as_millis()
+    ));
+    let response = util::dispatch_via_dispatcher(
         INTERNAL_DISPATCH_METHOD,
         payload.to_string().as_str(),
-        current_dispatch_timeout(),
-    )
+        timeout,
+    );
+    console::info(format!(
+        "[lua_backend] step=dispatch_via_dispatcher_end method={} success={}",
+        method, response.success
+    ));
+    response
 }
 
 fn dispatch_internal(params_json: &str) -> ToolResponse {
@@ -67,9 +86,26 @@ fn dispatch_internal(params_json: &str) -> ToolResponse {
 }
 
 fn call_lua_tool_direct(method: &str, params_json: &str) -> ToolResponse {
+    console::info(format!(
+        "[lua_backend] step=direct_begin method={} params_len={}",
+        method,
+        params_json.len()
+    ));
     match call_lua_tool_inner(method, params_json, true) {
-        Ok(response) => response,
-        Err(error) => error_response(error),
+        Ok(response) => {
+            console::info(format!(
+                "[lua_backend] step=direct_end method={} success={}",
+                method, response.success
+            ));
+            response
+        }
+        Err(error) => {
+            console::error(format!(
+                "[lua_backend] step=direct_error method={} error={}",
+                method, error
+            ));
+            error_response(error)
+        }
     }
 }
 
@@ -83,9 +119,20 @@ fn call_lua_tool_inner(
     match dispatch_to_lua(method, params_json) {
         Ok(response) => Ok(response),
         Err(error) if allow_rebootstrap && should_retry_after_rebootstrap(&error) => {
+            console::warn(format!(
+                "[lua_backend] step=rebootstrap_begin method={} error={}",
+                method, error
+            ));
             mark_backend_unbootstrapped()?;
             ensure_backend_bootstrapped()?;
-            dispatch_to_lua(method, params_json)
+            let retried = dispatch_to_lua(method, params_json);
+            if retried.is_ok() {
+                console::info(format!(
+                    "[lua_backend] step=rebootstrap_end method={} success=true",
+                    method
+                ));
+            }
+            retried
         }
         Err(error) => Err(error),
     }
@@ -98,16 +145,25 @@ fn ensure_backend_bootstrapped() -> Result<(), String> {
         .map_err(|_| "lua backend state lock poisoned".to_owned())?;
 
     if guard.bootstrapped {
+        console::info("[lua_backend] step=bootstrap_skip reason=already_bootstrapped");
         return Ok(());
     }
 
     let bootstrap = bootstrap_chunk();
+    console::info(format!(
+        "[lua_backend] step=bootstrap_begin chunk_len={}",
+        bootstrap.len()
+    ));
     let response = script::execute_lua_snippet(bootstrap, false)?;
     let ready = response
         .get("result")
         .and_then(Value::as_str)
         .ok_or_else(|| "lua backend bootstrap returned non-string result".to_owned())?;
 
+    console::info(format!(
+        "[lua_backend] step=bootstrap_marker marker={}",
+        ready
+    ));
     if ready != LUA_BACKEND_READY && ready != "already-bootstrapped" {
         return Err(format!(
             "lua backend bootstrap returned unexpected marker: {}",
@@ -116,20 +172,41 @@ fn ensure_backend_bootstrapped() -> Result<(), String> {
     }
 
     guard.bootstrapped = true;
+    console::info("[lua_backend] step=bootstrap_end success=true");
     Ok(())
 }
 
 fn dispatch_to_lua(method: &str, params_json: &str) -> Result<ToolResponse, String> {
+    console::info(format!(
+        "[lua_backend] step=call_global_begin function={} method={} params_len={}",
+        LUA_BACKEND_DISPATCH,
+        method,
+        params_json.len()
+    ));
     let response = script::call_lua_global(LUA_BACKEND_DISPATCH, &[method, params_json], false)?;
     let encoded = response
         .get("result")
         .and_then(Value::as_str)
         .ok_or_else(|| "lua backend dispatch returned non-string result".to_owned())?;
 
+    console::info(format!(
+        "[lua_backend] step=call_global_end function={} method={} result_len={}",
+        LUA_BACKEND_DISPATCH,
+        method,
+        encoded.len()
+    ));
+    console::info(format!(
+        "[lua_backend] step=parse_result_begin method={}",
+        method
+    ));
     let body: Value = serde_json::from_str(encoded)
         .map_err(|error| format!("lua backend returned invalid json: {}", error))?;
 
     let success = body.get("success").and_then(Value::as_bool).unwrap_or(true);
+    console::info(format!(
+        "[lua_backend] step=parse_result_end method={} success={}",
+        method, success
+    ));
 
     if success {
         return Ok(ToolResponse {
@@ -169,6 +246,7 @@ fn mark_backend_unbootstrapped() -> Result<(), String> {
         .lock()
         .map_err(|_| "lua backend state lock poisoned".to_owned())?;
     guard.bootstrapped = false;
+    console::warn("[lua_backend] step=mark_unbootstrapped reason=rebootstrap_requested");
     Ok(())
 }
 

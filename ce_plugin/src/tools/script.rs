@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use serde_json::{json, Map, Number, Value};
 
 use crate::runtime;
+use crate::runtime::console;
 
 use super::{util, ToolResponse};
 
@@ -228,6 +229,11 @@ where
     F: FnOnce(*mut LuaState, &LuaApi) -> Result<T, String>,
 {
     let app = runtime::app_state().ok_or_else(|| "plugin runtime unavailable".to_owned())?;
+    console::info(format!(
+        "[script] step=runtime_begin dispatcher_mode={} lua_state_export_available={}",
+        app.dispatcher_mode(),
+        app.lua_state_export_available()
+    ));
     if app.dispatcher_mode() != "window-message-hook" {
         return Err("script execution requires window-message-hook dispatcher mode".to_owned());
     }
@@ -242,6 +248,10 @@ where
     }
 
     let lua = resolve_lua_api()?;
+    console::info(format!(
+        "[script] step=runtime_ready lua_module={} state_ptr={:p}",
+        lua.module_name, state
+    ));
     callback(state, lua)
 }
 
@@ -251,20 +261,42 @@ fn execute_lua_code(
     code: &str,
     structured: bool,
 ) -> Result<Value, String> {
-    let _guard = StackGuard::new(state, lua);
+    let guard = StackGuard::new(state, lua);
     let code = CString::new(code).map_err(|_| "lua code contains interior null byte".to_owned())?;
 
+    console::info(format!(
+        "[script] step=load_begin kind=snippet structured={} code_len={} base_top={}",
+        structured,
+        code.as_bytes().len(),
+        guard.top
+    ));
     let status = unsafe { (lua.lua_l_loadstring)(state, code.as_ptr()) };
     if status != LUA_OK {
-        return Err(format!("Compile error: {}", lua_error_string(state, lua)));
+        let error = lua_error_string(state, lua);
+        console::error(format!(
+            "[script] step=load_error kind=snippet error={}",
+            error
+        ));
+        return Err(format!("Compile error: {}", error));
     }
+    console::info("[script] step=load_end kind=snippet success=true");
 
+    console::info("[script] step=pcall_begin kind=snippet argc=0");
     let status = unsafe { (lua.lua_pcallk)(state, 0, LUA_MULTRET, 0, 0, None) };
     if status != LUA_OK {
-        return Err(format!("Runtime error: {}", lua_error_string(state, lua)));
+        let error = lua_error_string(state, lua);
+        console::error(format!(
+            "[script] step=pcall_error kind=snippet error={}",
+            error
+        ));
+        return Err(format!("Runtime error: {}", error));
     }
+    console::info(format!(
+        "[script] step=pcall_end kind=snippet top_after={}",
+        unsafe { (lua.lua_gettop)(state) }
+    ));
 
-    collect_lua_results(state, lua, structured)
+    collect_lua_results(state, lua, guard.top, structured)
 }
 
 fn execute_lua_global(
@@ -274,19 +306,32 @@ fn execute_lua_global(
     args: &[&str],
     structured: bool,
 ) -> Result<Value, String> {
-    let _guard = StackGuard::new(state, lua);
+    let guard = StackGuard::new(state, lua);
     let function_name = CString::new(function_name)
         .map_err(|_| "lua function name contains interior null byte".to_owned())?;
 
+    console::info(format!(
+        "[script] step=getglobal_begin function={} argc={} structured={} base_top={}",
+        function_name.to_string_lossy(),
+        args.len(),
+        structured,
+        guard.top
+    ));
     unsafe {
         (lua.lua_getglobal)(state, function_name.as_ptr());
     }
     if unsafe { (lua.lua_type)(state, -1) } != LUA_TFUNCTION {
-        return Err(format!(
+        let error = format!(
             "CE Lua global {} is unavailable",
             function_name.to_string_lossy()
-        ));
+        );
+        console::error(format!("[script] step=getglobal_error error={}", error));
+        return Err(error);
     }
+    console::info(format!(
+        "[script] step=getglobal_end function={} success=true",
+        function_name.to_string_lossy()
+    ));
 
     for arg in args {
         let arg = CString::new(*arg)
@@ -296,22 +341,39 @@ fn execute_lua_global(
         }
     }
 
+    console::info(format!(
+        "[script] step=pcall_begin kind=global function={} argc={}",
+        function_name.to_string_lossy(),
+        args.len()
+    ));
     let status = unsafe { (lua.lua_pcallk)(state, args.len() as c_int, LUA_MULTRET, 0, 0, None) };
     if status != LUA_OK {
-        return Err(format!("Runtime error: {}", lua_error_string(state, lua)));
+        let error = lua_error_string(state, lua);
+        console::error(format!(
+            "[script] step=pcall_error kind=global function={} error={}",
+            function_name.to_string_lossy(),
+            error
+        ));
+        return Err(format!("Runtime error: {}", error));
     }
+    console::info(format!(
+        "[script] step=pcall_end kind=global function={} top_after={}",
+        function_name.to_string_lossy(),
+        unsafe { (lua.lua_gettop)(state) }
+    ));
 
-    collect_lua_results(state, lua, structured)
+    collect_lua_results(state, lua, guard.top, structured)
 }
 
 fn collect_lua_results(
     state: *mut LuaState,
     lua: &LuaApi,
+    base_top: c_int,
     structured: bool,
 ) -> Result<Value, String> {
     let top = unsafe { (lua.lua_gettop)(state) };
-    let first_index = 1;
-    let first_result = if top >= first_index {
+    let first_index = if top > base_top { base_top + 1 } else { 0 };
+    let first_result = if first_index > 0 {
         lua_to_string_via_tostring(state, lua, first_index)?
     } else {
         "nil".to_owned()
@@ -324,26 +386,35 @@ fn collect_lua_results(
         "result": first_result
     });
 
-    if structured {
-        let mut results = Vec::new();
-        for index in 1..=top {
+    let mut results = Vec::new();
+    if first_index > 0 {
+        for index in first_index..=top {
             results.push(lua_to_json(state, lua, index, 0)?);
         }
+    }
 
+    if let Some(object) = response.as_object_mut() {
+        object.insert(
+            "result_count".to_owned(),
+            Value::Number(Number::from(results.len() as u64)),
+        );
+    }
+
+    if structured {
         if let Some(object) = response.as_object_mut() {
             object.insert(
                 "result_type".to_owned(),
-                Value::String(lua_type_name_at(state, lua, first_index)),
+                Value::String(if first_index > 0 {
+                    lua_type_name_at(state, lua, first_index)
+                } else {
+                    "nil".to_owned()
+                }),
             );
             object.insert(
                 "structured_result".to_owned(),
                 results.first().cloned().unwrap_or(Value::Null),
             );
             object.insert("results".to_owned(), Value::Array(results.clone()));
-            object.insert(
-                "result_count".to_owned(),
-                Value::Number(Number::from(results.len() as u64)),
-            );
         }
     }
 
@@ -355,15 +426,22 @@ fn execute_auto_assemble(
     lua: &LuaApi,
     script: &str,
 ) -> Result<Value, String> {
-    let _guard = StackGuard::new(state, lua);
+    let guard = StackGuard::new(state, lua);
     let auto_assemble = CString::new("autoAssemble").expect("static string");
     let script =
         CString::new(script).map_err(|_| "script contains interior null byte".to_owned())?;
 
+    console::info(format!(
+        "[script] step=getglobal_begin function=autoAssemble argc=1 base_top={}",
+        guard.top
+    ));
     unsafe {
         (lua.lua_getglobal)(state, auto_assemble.as_ptr());
     }
     if unsafe { (lua.lua_type)(state, -1) } != LUA_TFUNCTION {
+        console::error(
+            "[script] step=getglobal_error error=CE Lua global autoAssemble is unavailable",
+        );
         return Err("CE Lua global autoAssemble is unavailable".to_owned());
     }
 
@@ -371,27 +449,36 @@ fn execute_auto_assemble(
         (lua.lua_pushlstring)(state, script.as_ptr(), script.as_bytes().len());
     }
 
+    console::info("[script] step=pcall_begin kind=auto_assemble argc=1");
     let status = unsafe { (lua.lua_pcallk)(state, 1, LUA_MULTRET, 0, 0, None) };
     if status != LUA_OK {
-        return Err(format!(
-            "AutoAssemble failed: {}",
-            lua_error_string(state, lua)
+        let error = lua_error_string(state, lua);
+        console::error(format!(
+            "[script] step=pcall_error kind=auto_assemble error={}",
+            error
         ));
+        return Err(format!("AutoAssemble failed: {}", error));
     }
 
     let top = unsafe { (lua.lua_gettop)(state) };
-    let executed = if top >= 1 {
-        unsafe { (lua.lua_toboolean)(state, 1) != 0 }
+    let first_result_index = guard.top + 1;
+    let second_result_index = guard.top + 2;
+    let executed = if top >= first_result_index {
+        unsafe { (lua.lua_toboolean)(state, first_result_index) != 0 }
     } else {
         false
     };
 
     if !executed {
-        let detail = if top >= 2 {
-            lua_to_string_via_tostring(state, lua, 2)?
+        let detail = if top >= second_result_index {
+            lua_to_string_via_tostring(state, lua, second_result_index)?
         } else {
             "unknown failure".to_owned()
         };
+        console::error(format!(
+            "[script] step=auto_assemble_failed detail={}",
+            detail
+        ));
         return Err(format!("AutoAssemble failed: {}", detail));
     }
 
@@ -403,8 +490,8 @@ fn execute_auto_assemble(
         "message": "Script assembled successfully"
     });
 
-    if top >= 2 {
-        let second = lua_to_json(state, lua, 2, 0)?;
+    if top >= second_result_index {
+        let second = lua_to_json(state, lua, second_result_index, 0)?;
         if let Some(object) = response.as_object_mut() {
             if let Some(symbols) = normalize_disable_info_symbols(&second) {
                 object.insert("symbols".to_owned(), symbols);
@@ -413,6 +500,10 @@ fn execute_auto_assemble(
         }
     }
 
+    console::info(format!(
+        "[script] step=pcall_end kind=auto_assemble top_after={} executed=true",
+        top
+    ));
     Ok(response)
 }
 
