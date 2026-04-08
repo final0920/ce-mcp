@@ -3,10 +3,12 @@ pub(crate) const SOURCE_LABEL: &str = "embedded:ce_plugin/src/lua";
 const BOOTSTRAP_LUA: &str = include_str!("bootstrap.lua");
 const PROTOCOL_LUA: &str = include_str!("protocol.lua");
 const BRIDGE_LUA: &str = include_str!("bridge.lua");
+const TRANSPORT_LUA: &str = include_str!("transport.lua");
+const RUNTIME_LUA: &str = include_str!("runtime.lua");
 
 pub(crate) fn bootstrap_source() -> String {
     let bootstrap = BOOTSTRAP_LUA.replace("__CE_MCP_VERSION__", env!("CARGO_PKG_VERSION"));
-    format!("{bootstrap}\n\n{PROTOCOL_LUA}\n\n{BRIDGE_LUA}")
+    format!("{bootstrap}\n\n{PROTOCOL_LUA}\n\n{BRIDGE_LUA}\n\n{TRANSPORT_LUA}\n\n{RUNTIME_LUA}")
 }
 
 #[cfg(test)]
@@ -19,6 +21,8 @@ mod tests {
         assert!(source.contains("local VERSION = \"0.1.0\""));
         assert!(source.contains("local function dispatch(method, params_json)"));
         assert!(source.contains("local function cleanupZombieState()"));
+        assert!(source.contains("__ce_mcp_embedded_transport_submit_json"));
+        assert!(source.contains("createLoopbackTransport"));
         assert!(!source.contains("StartMCPBridge()"));
         assert!(!source.contains("local function PipeWorker(thread)"));
         assert_eq!(SOURCE_LABEL, "embedded:ce_plugin/src/lua");

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::runtime::console;
 use crate::{lua, runtime};
 
-use super::{in_main_thread_dispatch, script, util, ToolResponse};
+use super::{in_main_thread_dispatch, lua_host, util, ToolResponse};
 
 pub(crate) const INTERNAL_DISPATCH_METHOD: &str = "__ce_mcp_call_lua_backend";
 
@@ -154,7 +154,7 @@ fn ensure_backend_bootstrapped() -> Result<(), String> {
         "[lua_backend] step=bootstrap_begin chunk_len={}",
         bootstrap.len()
     ));
-    let response = script::execute_lua_snippet(bootstrap, false)?;
+    let response = lua_host::execute_snippet(bootstrap, false)?;
     let ready = response
         .get("result")
         .and_then(Value::as_str)
@@ -183,7 +183,7 @@ fn dispatch_to_lua(method: &str, params_json: &str) -> Result<ToolResponse, Stri
         method,
         params_json.len()
     ));
-    let response = script::call_lua_global(LUA_BACKEND_DISPATCH, &[method, params_json], false)?;
+    let response = lua_host::call_global(LUA_BACKEND_DISPATCH, &[method, params_json], false)?;
     let encoded = response
         .get("result")
         .and_then(Value::as_str)

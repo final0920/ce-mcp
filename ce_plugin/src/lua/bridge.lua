@@ -2343,6 +2343,8 @@ local commandHandlers = {
 }
 
 
+-- Raw command core used by both the current Rust sync path and the future
+-- self-driven runtime shell in runtime.lua.
 local function dispatch(method, params_json)
     local ok_params, params_or_error = decode_backend_params(params_json)
     if not ok_params then
@@ -2360,4 +2362,12 @@ local function dispatch(method, params_json)
     end
 
     return encode_backend_result(result)
+end
+
+local function createEmbeddedCommandBridge()
+    return {
+        dispatch = dispatch,
+        cleanup = cleanupZombieState,
+        handlers = commandHandlers,
+    }
 end
