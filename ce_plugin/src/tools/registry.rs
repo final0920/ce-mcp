@@ -97,7 +97,7 @@ static TOOLS: &[ToolSpec] = &[
         description: "Read raw bytes from process memory.",
         input_schema_json: EMPTY_SCHEMA,
         deprecated: false,
-        aliases: &["read_bytes"],
+        aliases: &[],
         requires_serialized_dispatch: false,
         category: "memory",
     },
@@ -223,7 +223,7 @@ static TOOLS: &[ToolSpec] = &[
         description: "Search memory for an AOB signature.",
         input_schema_json: EMPTY_SCHEMA,
         deprecated: false,
-        aliases: &["pattern_scan"],
+        aliases: &[],
         requires_serialized_dispatch: false,
         category: "scan",
     },
@@ -340,7 +340,7 @@ static TOOLS: &[ToolSpec] = &[
         description: "Set an execution breakpoint.",
         input_schema_json: EMPTY_SCHEMA,
         deprecated: false,
-        aliases: &["set_execution_breakpoint"],
+        aliases: &[],
         requires_serialized_dispatch: true,
         category: "debug",
     },
@@ -349,7 +349,7 @@ static TOOLS: &[ToolSpec] = &[
         description: "Set a data breakpoint.",
         input_schema_json: EMPTY_SCHEMA,
         deprecated: false,
-        aliases: &["set_write_breakpoint"],
+        aliases: &[],
         requires_serialized_dispatch: true,
         category: "debug",
     },
@@ -403,7 +403,7 @@ static TOOLS: &[ToolSpec] = &[
         description: "Start a DBVM watch tracing session.",
         input_schema_json: EMPTY_SCHEMA,
         deprecated: false,
-        aliases: &["find_what_writes_safe", "find_what_accesses_safe"],
+        aliases: &[],
         requires_serialized_dispatch: true,
         category: "debug",
     },
@@ -412,7 +412,7 @@ static TOOLS: &[ToolSpec] = &[
         description: "Stop a DBVM watch session and return final results.",
         input_schema_json: EMPTY_SCHEMA,
         deprecated: false,
-        aliases: &["get_watch_results"],
+        aliases: &[],
         requires_serialized_dispatch: true,
         category: "debug",
     },
@@ -468,19 +468,9 @@ pub fn all_tools() -> &'static [ToolSpec] {
 }
 
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
-    let canonical = canonical_name(name);
-    TOOLS.iter().find(|tool| tool.name == canonical)
+    TOOLS.iter().find(|tool| tool.name == name)
 }
 
 pub fn canonical_name(name: &str) -> &str {
-    for tool in TOOLS {
-        if tool.name == name {
-            return tool.name;
-        }
-        if tool.aliases.iter().any(|alias| alias == &name) {
-            return tool.name;
-        }
-    }
-
     name
 }

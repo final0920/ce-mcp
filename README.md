@@ -6,7 +6,7 @@
 
 Single-DLL Cheat Engine plugin runtime for `ce-mcp`.
 
-The official delivery model remains **one `ce_plugin.dll`**. Phase 1 moves process / memory / analysis execution toward an **embedded Cheat Engine Lua backend** that is bootstrapped by the plugin itself. Users do **not** manually load a separate Lua bridge or manage a second runtime component.
+The official delivery model remains **one `ce_plugin.dll`**. Version 0.3.0 is a **clean rewrite** that keeps Rust as the formal product surface and removes historical compatibility debt from the official design. Users do **not** manually load a separate Lua bridge or manage a second runtime component.
 
 **Language**: [English](./README.md) | [简体中文](./README.zh-CN.md)
 
@@ -16,16 +16,14 @@ The official delivery model remains **one `ce_plugin.dll`**. Phase 1 moves proce
 - Original project license: MIT.
 - Original copyright notice: `Copyright (c) 2025 miscusi-peek`.
 
-## Delivery Model / Phase 1 Direction
+## Delivery Model / 0.3.0 Direction
 
 - Product identity: `ce-mcp / ce_plugin`
 - External artifact: one `ce_plugin.dll`
-- Rust remains responsible for plugin lifecycle, config, dispatcher, HTTP, MCP, and response shaping
-- Embedded CE Lua assets are an internal backend detail for CE-first execution paths
-- External versioning follows `ce_plugin/Cargo.toml` and this README, not a separate `CE_MCP_Bridge v11.x` line
-- Legacy `docs/ce_mcp_bridge.lua` is reference material for migration, not a standalone shipped component
-
-Migration rationale and scope notes: [`../docs/phase1-migration-notes.md`](../docs/phase1-migration-notes.md)
+- Rust is the only formal product runtime surface
+- Historical compatibility debt is not part of the 0.3.0 target
+- Legacy Lua materials are reference material only, not a product contract
+- External versioning follows `ce_plugin/Cargo.toml` and this README
 
 ## Overview
 
@@ -45,7 +43,7 @@ The result is a practical workflow where:
 - Cheat Engine remains the live debugger and memory-analysis engine
 - the MCP client provides transport and tool invocation
 - Rust provides the plugin envelope and transport surface
-- CE-native execution paths are increasingly routed through the embedded Lua backend where that is more reliable than raw WinAPI access
+- The 0.3.0 target is a clean Windows-focused Rust product surface with explicit MCP, config, and auth boundaries
 - the model handles hypothesis generation, planning, correlation, and iterative reverse-engineering tasks
 
 ## Reverse Engineering Workflow
@@ -192,17 +190,9 @@ Recent refactors standardize more runtime results for downstream orchestration:
 - debug and DBVM watch flows now expose structured `evidence`
 - batch endpoints are designed so one failing item does not abort the whole batch
 
-### Compatibility Aliases
+### Compatibility Policy
 
-Used to preserve compatibility with previous tool names.
-
-- `read_bytes`: Alias for `read_memory`.
-- `pattern_scan`: Alias for `aob_scan`.
-- `set_execution_breakpoint`: Alias for `set_breakpoint`.
-- `set_write_breakpoint`: Alias for `set_data_breakpoint`.
-- `find_what_writes_safe`: Alias for `start_dbvm_watch` in write-trace mode.
-- `find_what_accesses_safe`: Alias for `start_dbvm_watch` in access-trace mode.
-- `get_watch_results`: Alias for `stop_dbvm_watch`.
+Version 0.3.0 does **not** preserve historical compatibility aliases as part of the formal product surface. The supported entrypoints are the new MCP methods and the canonical tool names exposed by `tools/list`.
 
 ## Requirements
 
@@ -210,31 +200,34 @@ Used to preserve compatibility with previous tool names.
 - Cheat Engine `7.5 x64` or `7.6 x64`
 - Rust toolchain for local builds
 
-## Environment Variables
+## Configuration
 
-| Variable | Description | Default |
-|---|---|---|
-| `CE_PLUGIN_BIND_ADDR` | Plugin HTTP bind address. | `127.0.0.1:18765` |
-| `CE_PLUGIN_ALLOW_REMOTE` | Allow non-loopback HTTP clients. Keep disabled unless you intentionally expose the endpoint through a trusted tunnel or private network. | disabled |
-| `CE_PLUGIN_DISPATCH_TIMEOUT_MS` | Main-thread dispatch timeout. | `15000` |
-| `CE_PLUGIN_CONSOLE_LOG` | Set `0` to disable console logging. | enabled |
-| `CE_PLUGIN_CONSOLE_TITLE` | Console window title. | `流云MCP插件` |
-
-The plugin now prefers a config file placed next to the plugin DLL (fallback: process executable directory), and then applies environment variables as overrides.
+Version 0.3.0 uses a DLL-side config file as the formal configuration entrypoint.
 
 Supported config filenames:
-- `ce_plugin.config`
-- `ce_plugin.env`
-
-No separate Lua bootstrap file needs to be configured or loaded manually.
+- `ce_plugin.json`
+- `ce_plugin.config.json`
 
 Example:
-```text
-CE_PLUGIN_BIND_ADDR=0.0.0.0:18765
-CE_PLUGIN_ALLOW_REMOTE=1
-CE_PLUGIN_DISPATCH_TIMEOUT_MS=5000
-CE_PLUGIN_CONSOLE_TITLE=流云MCP插件
+```json
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 18765
+  },
+  "auth": {
+    "enabled": false,
+    "token": ""
+  },
+  "runtime": {
+    "dispatch_timeout_ms": 5000,
+    "console_log_enabled": true,
+    "console_title": "流云MCP插件"
+  }
+}
 ```
+
+`0.0.0.0` or public bind targets require `auth.enabled=true` and a non-empty bearer token.
 
 ## Project Layout
 

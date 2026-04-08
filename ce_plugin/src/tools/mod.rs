@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 mod addressing;
-mod alias;
 mod analysis;
 mod batch;
 mod debug;
@@ -16,10 +15,7 @@ mod scan;
 mod script;
 mod util;
 
-use std::borrow::Cow;
 use std::cell::Cell;
-
-use serde_json::{json, Value};
 
 pub use registry::{all_tools, canonical_name, find_tool};
 
@@ -51,18 +47,12 @@ pub(crate) fn in_main_thread_dispatch() -> bool {
 }
 
 pub fn dispatch_direct(method: &str, params_json: &str) -> ToolResponse {
-    if let Some(canonical) = alias::canonical_method(method) {
-        let normalized = normalize_alias_params(method, params_json);
-        return dispatch_canonical(canonical, normalized.as_ref());
-    }
-
     dispatch_canonical(method, params_json)
 }
 
 pub fn requires_serialized_dispatch(method: &str) -> bool {
-    let canonical = alias::canonical_method(method).unwrap_or(method);
     matches!(
-        canonical,
+        method,
         "get_symbol_address"
             | "get_address_info"
             | "batch_get_address_info"
@@ -125,30 +115,6 @@ fn dispatch_canonical(method: &str, params_json: &str) -> ToolResponse {
     util::method_not_found(method)
 }
 
-fn normalize_alias_params<'a>(method: &str, params_json: &'a str) -> Cow<'a, str> {
-    match method {
-        "find_what_writes_safe" => inject_default_param(params_json, "mode", json!("w")),
-        "find_what_accesses_safe" => inject_default_param(params_json, "mode", json!("r")),
-        _ => Cow::Borrowed(params_json),
-    }
-}
-
-fn inject_default_param<'a>(params_json: &'a str, key: &str, value: Value) -> Cow<'a, str> {
-    let Ok(mut params) = serde_json::from_str::<Value>(params_json) else {
-        return Cow::Borrowed(params_json);
-    };
-    let Some(object) = params.as_object_mut() else {
-        return Cow::Borrowed(params_json);
-    };
-
-    if object.contains_key(key) {
-        return Cow::Borrowed(params_json);
-    }
-
-    object.insert(key.to_owned(), value);
-    Cow::Owned(params.to_string())
-}
-
 struct MainThreadDispatchGuard;
 
 impl MainThreadDispatchGuard {
@@ -161,26 +127,5 @@ impl MainThreadDispatchGuard {
 impl Drop for MainThreadDispatchGuard {
     fn drop(&mut self) {
         MAIN_THREAD_DISPATCH_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_alias_params;
-
-    #[test]
-    fn access_alias_injects_read_mode_when_missing() {
-        let normalized =
-            normalize_alias_params("find_what_accesses_safe", r#"{"address":"0x1234"}"#);
-        assert_eq!(normalized.as_ref(), r#"{"address":"0x1234","mode":"r"}"#);
-    }
-
-    #[test]
-    fn access_alias_keeps_explicit_mode() {
-        let normalized = normalize_alias_params(
-            "find_what_accesses_safe",
-            r#"{"address":"0x1234","mode":"rw"}"#,
-        );
-        assert_eq!(normalized.as_ref(), r#"{"address":"0x1234","mode":"rw"}"#);
     }
 }

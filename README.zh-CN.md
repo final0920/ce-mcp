@@ -6,7 +6,7 @@
 
 `ce-mcp` 的单 DLL Cheat Engine 插件运行时。
 
-正式交付形态保持为 **一个 `ce_plugin.dll`**。Phase 1 会把进程 / 内存 / 分析等执行路径逐步切到 **插件内部自动 bootstrap 的 CE Lua 后端**。用户**不需要**手动加载额外 Lua bridge，也不需要维护第二套运行组件。
+正式交付形态保持为 **一个 `ce_plugin.dll`**。0.3.0 按 **clean rewrite / 清爽重构** 推进，以 Rust 作为唯一正式产品面，不再背历史兼容债务。用户**不需要**手动加载额外 Lua bridge，也不需要维护第二套运行组件。
 
 **语言**: [English](./README.md) | [简体中文](./README.zh-CN.md)
 
@@ -16,16 +16,14 @@
 - 原项目许可证：MIT。
 - 原始版权声明：`Copyright (c) 2025 miscusi-peek`。
 
-## 交付形态 / Phase 1 方向
+## 交付形态 / 0.3.0 方向
 
 - 产品身份：`ce-mcp / ce_plugin`
 - 对外交付物：一个 `ce_plugin.dll`
-- Rust 继续负责插件生命周期、配置、调度器、HTTP、MCP 与结果包装
-- 内嵌 CE Lua 资产属于内部后端实现细节，服务于 CE-first 执行路径
-- 对外版本口径以 `ce_plugin/Cargo.toml` 与本 README 为准，不再额外暴露 `CE_MCP_Bridge v11.x` 一类独立产品版本线
-- `docs/ce_mcp_bridge.lua` 目前只作为迁移参考，不是面向最终用户交付的独立组件
-
-迁移背景与范围说明见：[`../docs/phase1-migration-notes.md`](../docs/phase1-migration-notes.md)
+- Rust 是唯一正式产品运行时表面
+- 历史兼容债务不再纳入 0.3.0 正式目标
+- 旧 Lua 材料只保留为参考，不再作为产品契约
+- 对外版本口径以 `ce_plugin/Cargo.toml` 与本 README 为准
 
 ## 项目定位
 
@@ -192,17 +190,9 @@ ce_plugin/target/release/ce_plugin.dll
 - 断点与 DBVM watch 流程会返回结构化 `evidence`
 - batch 接口按单项容错设计，单条失败不会中断整批
 
-### 兼容别名
+### 兼容策略
 
-用于兼容旧调用习惯与既有工具命名。
-
-- `read_bytes`: `read_memory` 的兼容别名。
-- `pattern_scan`: `aob_scan` 的兼容别名。
-- `set_execution_breakpoint`: `set_breakpoint` 的兼容别名。
-- `set_write_breakpoint`: `set_data_breakpoint` 的兼容别名。
-- `find_what_writes_safe`: `start_dbvm_watch` 的写监控别名。
-- `find_what_accesses_safe`: `start_dbvm_watch` 的访问监控别名。
-- `get_watch_results`: `stop_dbvm_watch` 的兼容别名。
+0.3.0 **不再**把历史兼容别名作为正式产品面的一部分。正式支持的入口以新版 MCP 方法面和 `tools/list` 暴露出的 canonical tool name 为准。
 
 ## 环境要求
 
@@ -210,31 +200,34 @@ ce_plugin/target/release/ce_plugin.dll
 - Cheat Engine `7.5 x64` 或 `7.6 x64`
 - 本地编译时需要 Rust toolchain
 
-## 环境变量
+## 配置
 
-| 变量 | 说明 | 默认值 |
-|---|---|---|
-| `CE_PLUGIN_BIND_ADDR` | 插件 HTTP 监听地址。 | `127.0.0.1:18765` |
-| `CE_PLUGIN_ALLOW_REMOTE` | 是否允许非回环地址访问 HTTP 接口。除非你明确通过可信隧道或私网开放联调，否则保持关闭。 | 默认关闭 |
-| `CE_PLUGIN_DISPATCH_TIMEOUT_MS` | 主线程调度超时。 | `15000` |
-| `CE_PLUGIN_CONSOLE_LOG` | 设为 `0` 时关闭控制台日志。 | 默认开启 |
-| `CE_PLUGIN_CONSOLE_TITLE` | 控制台窗口标题。 | `流云MCP插件` |
-
-插件现在会优先读取 **插件 DLL 同级目录** 下的配置文件（兜底再读进程可执行文件目录），然后再应用环境变量覆盖。
+0.3.0 的正式配置入口是 **DLL 同级配置文件**。
 
 支持的配置文件名：
-- `ce_plugin.config`
-- `ce_plugin.env`
-
-不需要额外配置或手工加载任何 Lua bootstrap 文件。
+- `ce_plugin.json`
+- `ce_plugin.config.json`
 
 示例：
-```text
-CE_PLUGIN_BIND_ADDR=0.0.0.0:18765
-CE_PLUGIN_ALLOW_REMOTE=1
-CE_PLUGIN_DISPATCH_TIMEOUT_MS=5000
-CE_PLUGIN_CONSOLE_TITLE=流云MCP插件
+```json
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 18765
+  },
+  "auth": {
+    "enabled": false,
+    "token": ""
+  },
+  "runtime": {
+    "dispatch_timeout_ms": 5000,
+    "console_log_enabled": true,
+    "console_title": "流云MCP插件"
+  }
+}
 ```
+
+当监听 `0.0.0.0` 或公网地址时，必须启用 `auth.enabled=true` 且提供非空 Bearer Token。
 
 ## 项目结构
 
