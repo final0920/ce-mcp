@@ -58,8 +58,11 @@ local function createEmbeddedBackendRuntime(options)
             created_at = os.time(),
             started_at = nil,
             pump_interval_ms = normalize_pump_interval(options.pump_interval_ms),
-            auto_pump_available = type(createTimer) == "function",
+            auto_pump_available = type(createTimer) == "function" or type(createThread) == "function",
             auto_pump_enabled = false,
+            auto_pump_mode = nil,
+            worker_available = type(createThread) == "function",
+            timer_available = type(createTimer) == "function",
         }
     }
 
@@ -84,6 +87,9 @@ local function createEmbeddedBackendRuntime(options)
             pump_interval_ms = self.state.pump_interval_ms,
             auto_pump_available = self.state.auto_pump_available,
             auto_pump_enabled = self.state.auto_pump_enabled,
+            auto_pump_mode = self.state.auto_pump_mode,
+            worker_available = self.state.worker_available,
+            timer_available = self.state.timer_available,
             transport = transport_stats,
         }
     end
@@ -93,7 +99,12 @@ local function createEmbeddedBackendRuntime(options)
             pcall(function() self._timer.destroy() end)
             self._timer = nil
         end
+        if self._worker and type(self._worker.terminate) == "function" then
+            pcall(function() self._worker.terminate() end)
+            self._worker = nil
+        end
         self.state.auto_pump_enabled = false
+        self.state.auto_pump_mode = nil
         if reason then
             self.state.last_error = reason
         end
@@ -102,40 +113,76 @@ local function createEmbeddedBackendRuntime(options)
     function runtime:enable_auto_pump()
         if not self.state.auto_pump_available then
             self.state.auto_pump_enabled = false
-            return false, "createTimer unavailable"
+            self.state.auto_pump_mode = nil
+            return false, "no auto-pump primitive available"
         end
-        if self._timer then
+        if self._worker or self._timer then
             self.state.auto_pump_enabled = true
             return true
         end
 
-        local ok, timer = pcall(function()
-            local t = createTimer(nil, false)
-            t.Interval = self.state.pump_interval_ms
-            t.OnTimer = function()
-                if not self.state.running then
-                    return
-                end
-                local result = self:drain(16)
-                self.state.last_pump_at = os.time()
-                self.state.last_pump_processed = result.processed or 0
-                if not result.success then
-                    self.state.last_error = result.error
-                end
-            end
-            t.Enabled = true
-            return t
-        end)
+        if self.state.worker_available then
+            local runtime_ref = self
+            local ok, worker = pcall(function()
+                return createThread(function(thread)
+                    while not thread.Terminated do
+                        if runtime_ref.state.running then
+                            thread.synchronize(function()
+                                local result = runtime_ref:drain(16)
+                                runtime_ref.state.last_pump_at = os.time()
+                                runtime_ref.state.last_pump_processed = result.processed or 0
+                                if not result.success then
+                                    runtime_ref.state.last_error = result.error
+                                end
+                            end)
+                        end
+                        sleep(runtime_ref.state.pump_interval_ms)
+                    end
+                end)
+            end)
 
-        if not ok or not timer then
-            self.state.auto_pump_enabled = false
-            self.state.last_error = ok and "createTimer returned nil" or tostring(timer)
-            return false, self.state.last_error
+            if ok and worker then
+                self._worker = worker
+                self.state.auto_pump_enabled = true
+                self.state.auto_pump_mode = "thread"
+                return true
+            end
+
+            self.state.last_error = ok and "createThread returned nil" or tostring(worker)
         end
 
-        self._timer = timer
-        self.state.auto_pump_enabled = true
-        return true
+        if self.state.timer_available then
+            local ok, timer = pcall(function()
+                local t = createTimer(nil, false)
+                t.Interval = self.state.pump_interval_ms
+                t.OnTimer = function()
+                    if not self.state.running then
+                        return
+                    end
+                    local result = self:drain(16)
+                    self.state.last_pump_at = os.time()
+                    self.state.last_pump_processed = result.processed or 0
+                    if not result.success then
+                        self.state.last_error = result.error
+                    end
+                end
+                t.Enabled = true
+                return t
+            end)
+
+            if ok and timer then
+                self._timer = timer
+                self.state.auto_pump_enabled = true
+                self.state.auto_pump_mode = "timer"
+                return true
+            end
+
+            self.state.last_error = ok and "createTimer returned nil" or tostring(timer)
+        end
+
+        self.state.auto_pump_enabled = false
+        self.state.auto_pump_mode = nil
+        return false, self.state.last_error or "failed to enable auto-pump"
     end
 
     function runtime:start(config)
@@ -281,16 +328,17 @@ local function createEmbeddedBackendRuntime(options)
         }
     end
 
-    function runtime:recv_response()
+    function runtime:recv_response(expected_id)
         if not self.transport or not self.transport.pop_response then
             return { success = false, error = "transport unavailable" }
         end
 
-        local response = self.transport:pop_response()
+        local response = self.transport:pop_response(expected_id)
         local stats = self.transport:stats()
         return {
             success = true,
             response = response,
+            expected_id = expected_id,
             pending_requests = stats.pending_requests or 0,
             pending_responses = stats.pending_responses or 0,
             idle = response == nil,
@@ -374,8 +422,20 @@ _G["__ce_mcp_embedded_transport_step_json"] = function(limit)
     return encode_backend_result(ensureEmbeddedBackendRuntime():drain(limit))
 end
 
-_G["__ce_mcp_embedded_transport_recv_json"] = function()
-    return encode_backend_result(ensureEmbeddedBackendRuntime():recv_response())
+_G["__ce_mcp_embedded_transport_recv_json"] = function(request_json)
+    local request, err = decode_runtime_json_argument(request_json)
+    if err then
+        return encode_backend_error(err)
+    end
+
+    local expected_id = nil
+    if type(request) == "table" then
+        expected_id = request.id
+    elseif type(request) == "string" then
+        expected_id = request
+    end
+
+    return encode_backend_result(ensureEmbeddedBackendRuntime():recv_response(expected_id))
 end
 
 local function cleanupZombieState()
