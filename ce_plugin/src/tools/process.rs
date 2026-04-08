@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{addressing, lua_backend, util, ToolResponse};
+use super::{addressing, lua_client, util, ToolResponse};
 use crate::runtime;
 
 const METHODS: &[&str] = &[
@@ -67,18 +67,7 @@ fn ping() -> ToolResponse {
 }
 
 fn call_lua_json_tool(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
-    let response = lua_backend::call_lua_tool(method, params_json);
-    if !response.success {
-        return Err(response);
-    }
-
-    serde_json::from_str::<Value>(&response.body_json).map_err(|error| ToolResponse {
-        success: false,
-        body_json: format!(
-            "lua backend returned invalid json for {}: {}",
-            method, error
-        ),
-    })
+    lua_client::call_tool_json(method, params_json)
 }
 
 fn is_no_process_attached_response(response: &ToolResponse) -> bool {

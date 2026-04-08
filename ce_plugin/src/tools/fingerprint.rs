@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use super::{lua_backend, process, util, ToolResponse};
+use super::{lua_client, process, util, ToolResponse};
 use crate::domain::fingerprint::ModuleFingerprint;
 
 const METHODS: &[&str] = &["get_module_fingerprint"];
@@ -134,17 +134,7 @@ fn read_module_pe_metadata(module_base: usize) -> Result<PeMetadata, String> {
 }
 
 fn call_lua_json_tool(method: &str, params: Value) -> Result<Value, String> {
-    let response = lua_backend::call_lua_tool(method, &params.to_string());
-    if !response.success {
-        return Err(response.body_json);
-    }
-
-    serde_json::from_str::<Value>(&response.body_json).map_err(|error| {
-        format!(
-            "lua backend returned invalid json for {}: {}",
-            method, error
-        )
-    })
+    lua_client::call_tool_json_string_err(method, &params)
 }
 
 fn read_memory_exact(address: usize, size: usize) -> Result<Vec<u8>, String> {

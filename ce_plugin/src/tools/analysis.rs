@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{addressing, lua_backend, process, util, ToolResponse};
+use super::{addressing, lua_backend, lua_client, process, util, ToolResponse};
 use crate::runtime::ModuleInfo;
 
 const METHODS: &[&str] = &[
@@ -714,13 +714,7 @@ fn cheat_engine_vartype_name(vartype: i64) -> &'static str {
 }
 
 fn call_lua_tool_json(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
-    let response = lua_backend::call_lua_tool(method, params_json);
-    if !response.success {
-        return Err(response);
-    }
-
-    serde_json::from_str::<Value>(&response.body_json)
-        .map_err(|error| error_response(format!("invalid {} lua response json: {}", method, error)))
+    lua_client::call_tool_json(method, params_json)
 }
 
 fn response_address(value: Option<&Value>) -> Option<usize> {

@@ -7,6 +7,7 @@ mod batch;
 mod debug;
 mod fingerprint;
 mod lua_backend;
+mod lua_client;
 mod lua_host;
 mod memory;
 mod process;
