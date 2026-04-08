@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
-use super::{addressing, script, util, ToolResponse};
+use super::{addressing, process, script, util, ToolResponse};
 use crate::domain::context::RequestContext;
 use crate::domain::evidence::{EvidenceRecord, EvidenceType};
 use crate::runtime;
@@ -1082,16 +1082,7 @@ fn execute_structured_snippet(code: &str) -> ToolResponse {
 }
 
 fn current_modules() -> Vec<runtime::ModuleInfo> {
-    let Some(app) = runtime::app_state() else {
-        return Vec::new();
-    };
-
-    let process_id = app.opened_process_id().unwrap_or(0);
-    if process_id == 0 {
-        return Vec::new();
-    }
-
-    runtime::enum_modules(process_id).unwrap_or_default()
+    process::current_modules()
 }
 
 fn enrich_breakpoint_hits_response(response: ToolResponse, ctx: &RequestContext) -> ToolResponse {

@@ -1,8 +1,6 @@
-use core::ffi::c_void;
-
 use serde_json::{json, Map, Value};
 
-use super::{analysis, process, util, ToolResponse};
+use super::{analysis, memory, process, util, ToolResponse};
 use crate::runtime;
 
 const METHODS: &[&str] = &[
@@ -113,9 +111,6 @@ fn batch_read_memory(params_json: &str) -> ToolResponse {
     let Some(_app) = runtime::app_state() else {
         return error_response("runtime not initialized".to_owned());
     };
-    let Some(handle) = opened_process_handle() else {
-        return error_response("process handle unavailable".to_owned());
-    };
 
     let params = match util::parse_params(params_json) {
         Ok(value) => value,
@@ -125,13 +120,12 @@ fn batch_read_memory(params_json: &str) -> ToolResponse {
         Some(values) => values,
         None => return error_response("missing items array".to_owned()),
     };
-    let modules = process::current_modules();
 
     let results = items
         .iter()
         .take(MAX_BATCH_ITEMS)
         .enumerate()
-        .map(|(index, item)| read_memory_item(handle, item, index, &modules))
+        .map(|(index, item)| read_memory_item(item, index))
         .collect::<Vec<_>>();
     let error_count = results
         .iter()
@@ -245,12 +239,7 @@ fn disassemble_item(item: &Value, index: usize) -> Value {
     }
 }
 
-fn read_memory_item(
-    handle: *mut c_void,
-    item: &Value,
-    index: usize,
-    modules: &[runtime::ModuleInfo],
-) -> Value {
+fn read_memory_item(item: &Value, index: usize) -> Value {
     let Some(object) = item.as_object() else {
         return json!({
             "success": false,
@@ -260,16 +249,13 @@ fn read_memory_item(
         });
     };
 
-    let address = match process::resolve_address_param(object.get("address"), modules) {
-        Ok(value) => value,
-        Err(error) => {
-            return json!({
-                "success": false,
-                "index": index,
-                "input": item,
-                "error": error,
-            });
-        }
+    let Some(address) = object.get("address").cloned() else {
+        return json!({
+            "success": false,
+            "index": index,
+            "input": item,
+            "error": "missing address",
+        });
     };
     let size = object
         .get("size")
@@ -278,42 +264,43 @@ fn read_memory_item(
         .unwrap_or(256)
         .min(MAX_READ_SIZE);
 
-    match runtime::read_process_memory(handle, address, size) {
-        Ok(bytes) => {
-            let hex = bytes
-                .iter()
-                .map(|byte| format!("{:02X}", byte))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut response = Map::new();
-            response.insert("success".to_owned(), Value::Bool(true));
-            response.insert("index".to_owned(), json!(index));
-            response.insert("address".to_owned(), json!(util::format_address(address)));
-            response.insert(
-                "normalized_address".to_owned(),
-                json!(super::addressing::normalize_address_from_modules(
-                    address, modules
-                )),
-            );
-            response.insert("size".to_owned(), json!(bytes.len()));
-            response.insert("data".to_owned(), json!(hex));
-            response.insert("bytes".to_owned(), json!(bytes));
-            if let Some(label) = object.get("label").and_then(Value::as_str) {
-                response.insert("label".to_owned(), json!(label));
+    let mut forwarded = Map::new();
+    forwarded.insert("address".to_owned(), address);
+    forwarded.insert("size".to_owned(), json!(size));
+
+    let Some(response) = memory::dispatch("read_memory", &Value::Object(forwarded).to_string())
+    else {
+        return json!({
+            "success": false,
+            "index": index,
+            "error": "read_memory dispatcher unavailable",
+        });
+    };
+    if !response.success {
+        return json!({
+            "success": false,
+            "index": index,
+            "input": item,
+            "error": response.body_json,
+        });
+    }
+
+    match serde_json::from_str::<Value>(&response.body_json) {
+        Ok(mut value) => {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("index".to_owned(), json!(index));
+                if let Some(label) = object.get("label").and_then(Value::as_str) {
+                    obj.insert("label".to_owned(), json!(label));
+                }
             }
-            Value::Object(response)
+            value
         }
         Err(error) => json!({
             "success": false,
             "index": index,
-            "address": util::format_address(address),
-            "error": error,
+            "error": format!("invalid read_memory result json: {}", error),
         }),
     }
-}
-
-fn opened_process_handle() -> Option<*mut c_void> {
-    runtime::app_state().and_then(|app| app.opened_process_handle())
 }
 
 fn error_response(message: String) -> ToolResponse {

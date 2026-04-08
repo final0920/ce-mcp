@@ -1,3 +1,12 @@
+//! Minimal host-side Windows API surface.
+//!
+//! Primary process/module/memory flows should prefer the embedded CE/Lua backend.
+//! This module only keeps the宿主兜底能力 that still cannot be sourced from Lua:
+//! - Toolhelp32 module/thread snapshots for fallback metadata
+//! - raw ReadProcessMemory / WriteProcessMemory for the few remaining low-level helpers
+//! Scan-specific region enumeration/signature/checksum flows are intentionally kept out of here.
+//! Avoid reintroducing higher-level business logic here.
+
 use core::ffi::c_void;
 
 type Bool = i32;
@@ -10,22 +19,6 @@ const TH32CS_SNAPMODULE: Dword = 0x0000_0008;
 const TH32CS_SNAPMODULE32: Dword = 0x0000_0010;
 const TH32CS_SNAPTHREAD: Dword = 0x0000_0004;
 const INVALID_HANDLE_VALUE: isize = -1;
-pub const MEM_COMMIT: Dword = 0x0000_1000;
-pub const MEM_RESERVE: Dword = 0x0000_2000;
-pub const MEM_FREE: Dword = 0x0001_0000;
-pub const PAGE_NOACCESS: Dword = 0x01;
-pub const PAGE_READONLY: Dword = 0x02;
-pub const PAGE_READWRITE: Dword = 0x04;
-pub const PAGE_WRITECOPY: Dword = 0x08;
-pub const PAGE_EXECUTE: Dword = 0x10;
-pub const PAGE_EXECUTE_READ: Dword = 0x20;
-pub const PAGE_EXECUTE_READWRITE: Dword = 0x40;
-pub const PAGE_EXECUTE_WRITECOPY: Dword = 0x80;
-pub const PAGE_GUARD: Dword = 0x100;
-pub const PAGE_NOCACHE: Dword = 0x200;
-pub const PAGE_WRITECOMBINE: Dword = 0x400;
-const USER_ADDRESS_LIMIT_X64: usize = 0x0000_7FFF_FFFF_FFFF;
-const USER_ADDRESS_LIMIT_X86: usize = 0x7FFE_FFFF;
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -35,12 +28,6 @@ extern "system" {
     fn Module32NextW(snapshot: Handle, entry: *mut ModuleEntry32W) -> Bool;
     fn Thread32First(snapshot: Handle, entry: *mut ThreadEntry32) -> Bool;
     fn Thread32Next(snapshot: Handle, entry: *mut ThreadEntry32) -> Bool;
-    fn QueryFullProcessImageNameW(
-        process: Handle,
-        flags: Dword,
-        exe_name: *mut u16,
-        size: *mut Dword,
-    ) -> Bool;
 
     fn ReadProcessMemory(
         process: Handle,
@@ -57,12 +44,6 @@ extern "system" {
         size: SizeT,
         number_of_bytes_written: *mut SizeT,
     ) -> Bool;
-    fn VirtualQueryEx(
-        process: Handle,
-        address: *const c_void,
-        buffer: *mut MemoryBasicInformation,
-        length: SizeT,
-    ) -> SizeT;
 }
 
 #[repr(C)]
@@ -90,18 +71,6 @@ struct ThreadEntry32 {
     dw_flags: Dword,
 }
 
-#[repr(C)]
-struct MemoryBasicInformation {
-    base_address: *mut c_void,
-    allocation_base: *mut c_void,
-    allocation_protect: Dword,
-    partition_id: u16,
-    region_size: SizeT,
-    state: Dword,
-    protect: Dword,
-    type_: Dword,
-}
-
 #[derive(Debug, Clone)]
 pub struct ModuleInfo {
     pub name: String,
@@ -114,34 +83,6 @@ pub struct ModuleInfo {
 pub struct ThreadInfo {
     pub thread_id: u32,
     pub owner_process_id: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct MemoryRegionInfo {
-    pub base_address: usize,
-    pub allocation_base: usize,
-    pub allocation_protect: u32,
-    pub region_size: usize,
-    pub state: u32,
-    pub protect: u32,
-    pub type_: u32,
-}
-
-pub fn query_process_image_name(process: Handle) -> Result<String, String> {
-    if process.is_null() {
-        return Err("process handle is null".to_owned());
-    }
-
-    let mut buffer = vec![0u16; 260];
-    let mut size = buffer.len() as Dword;
-
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size) };
-    if ok == 0 {
-        return Err("QueryFullProcessImageNameW failed".to_owned());
-    }
-
-    buffer.truncate(size as usize);
-    Ok(String::from_utf16_lossy(&buffer))
 }
 
 pub fn enum_modules(process_id: u32) -> Result<Vec<ModuleInfo>, String> {
@@ -219,69 +160,6 @@ pub fn enum_threads(process_id: u32) -> Result<Vec<ThreadInfo>, String> {
         CloseHandle(snapshot);
     }
     Ok(threads)
-}
-
-pub fn enum_memory_regions(
-    process: Handle,
-    max_regions: Option<usize>,
-) -> Result<Vec<MemoryRegionInfo>, String> {
-    if process.is_null() {
-        return Err("process handle is null".to_owned());
-    }
-
-    let mut address = 0usize;
-    let limit = user_address_limit();
-    let mut regions = Vec::new();
-
-    while address < limit {
-        if let Some(max_regions) = max_regions {
-            if regions.len() >= max_regions {
-                break;
-            }
-        }
-
-        let mut info = MemoryBasicInformation {
-            base_address: core::ptr::null_mut(),
-            allocation_base: core::ptr::null_mut(),
-            allocation_protect: 0,
-            partition_id: 0,
-            region_size: 0,
-            state: 0,
-            protect: 0,
-            type_: 0,
-        };
-        let queried = unsafe {
-            VirtualQueryEx(
-                process,
-                address as *const c_void,
-                &mut info,
-                core::mem::size_of::<MemoryBasicInformation>(),
-            )
-        };
-        if queried == 0 {
-            break;
-        }
-
-        let base_address = info.base_address as usize;
-        let region_size = info.region_size.max(0x1000);
-        regions.push(MemoryRegionInfo {
-            base_address,
-            allocation_base: info.allocation_base as usize,
-            allocation_protect: info.allocation_protect,
-            region_size,
-            state: info.state,
-            protect: info.protect,
-            type_: info.type_,
-        });
-
-        let next_address = base_address.saturating_add(region_size);
-        if next_address <= address {
-            break;
-        }
-        address = next_address;
-    }
-
-    Ok(regions)
 }
 
 pub fn read_process_memory(
@@ -366,104 +244,4 @@ fn utf16_z_to_string(buffer: &[u16]) -> String {
         .position(|value| *value == 0)
         .unwrap_or(buffer.len());
     String::from_utf16_lossy(&buffer[..len])
-}
-
-pub fn user_address_limit() -> usize {
-    if cfg!(target_pointer_width = "64") {
-        USER_ADDRESS_LIMIT_X64
-    } else {
-        USER_ADDRESS_LIMIT_X86
-    }
-}
-
-pub fn is_region_committed(region: &MemoryRegionInfo) -> bool {
-    region.state == MEM_COMMIT
-}
-
-pub fn is_region_guarded(region: &MemoryRegionInfo) -> bool {
-    region.protect & PAGE_GUARD != 0
-}
-
-pub fn is_region_readable(region: &MemoryRegionInfo) -> bool {
-    let base = region.protect & 0xFF;
-    matches!(
-        base,
-        PAGE_READONLY
-            | PAGE_READWRITE
-            | PAGE_WRITECOPY
-            | PAGE_EXECUTE_READ
-            | PAGE_EXECUTE_READWRITE
-            | PAGE_EXECUTE_WRITECOPY
-    )
-}
-
-pub fn is_region_writable(region: &MemoryRegionInfo) -> bool {
-    let base = region.protect & 0xFF;
-    matches!(
-        base,
-        PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
-    )
-}
-
-pub fn is_region_executable(region: &MemoryRegionInfo) -> bool {
-    let base = region.protect & 0xFF;
-    matches!(
-        base,
-        PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
-    )
-}
-
-pub fn is_region_copy_on_write(region: &MemoryRegionInfo) -> bool {
-    let base = region.protect & 0xFF;
-    matches!(base, PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)
-}
-
-pub fn is_region_usable(region: &MemoryRegionInfo) -> bool {
-    is_region_committed(region) && !is_region_guarded(region) && region.protect & PAGE_NOACCESS == 0
-}
-
-pub fn protection_to_string(protect: u32) -> String {
-    let mut text = String::new();
-    let base = protect & 0xFF;
-
-    if matches!(
-        base,
-        PAGE_READONLY
-            | PAGE_READWRITE
-            | PAGE_WRITECOPY
-            | PAGE_EXECUTE_READ
-            | PAGE_EXECUTE_READWRITE
-            | PAGE_EXECUTE_WRITECOPY
-    ) {
-        text.push('R');
-    }
-    if matches!(
-        base,
-        PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
-    ) {
-        text.push('W');
-    }
-    if matches!(
-        base,
-        PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
-    ) {
-        text.push('X');
-    }
-    if matches!(base, PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY) {
-        text.push('C');
-    }
-    if protect & PAGE_GUARD != 0 {
-        text.push('G');
-    }
-    if protect & PAGE_NOCACHE != 0 {
-        text.push('N');
-    }
-    if protect & PAGE_WRITECOMBINE != 0 {
-        text.push('M');
-    }
-    if text.is_empty() {
-        format!("0x{:X}", protect)
-    } else {
-        text
-    }
 }

@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use super::{process, util, ToolResponse};
+use super::{lua_backend, process, util, ToolResponse};
 use crate::domain::fingerprint::ModuleFingerprint;
-use crate::runtime;
 
 const METHODS: &[&str] = &["get_module_fingerprint"];
 const PE_HEADER_READ_SIZE: usize = 0x1000;
 const MAX_PE_HEADER_READ_SIZE: usize = 0x10000;
 const IMAGE_DIRECTORY_ENTRY_IMPORT: usize = 1;
+const LUA_MEMORY_CHUNK_SIZE: usize = 0x10000;
 
 pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
     let response = match method {
@@ -26,10 +26,6 @@ pub fn supported_methods() -> &'static [&'static str] {
 }
 
 fn get_module_fingerprint(params_json: &str) -> ToolResponse {
-    let Some(app) = runtime::app_state() else {
-        return error_response("runtime not initialized".to_owned());
-    };
-
     let params = match util::parse_params(params_json) {
         Ok(value) => value,
         Err(error) => return error_response(error),
@@ -49,23 +45,14 @@ fn get_module_fingerprint(params_json: &str) -> ToolResponse {
         return error_response(format!("module not found: {}", module_name));
     };
 
-    let header = app
-        .opened_process_handle()
-        .and_then(|handle| read_module_pe_metadata(handle, module.base_address).ok());
-
-    let section_hashes = app
-        .opened_process_handle()
-        .and_then(|handle| {
-            header
-                .as_ref()
-                .map(|metadata| compute_section_hashes(handle, module.base_address, metadata))
-        })
+    let header = read_module_pe_metadata(module.base_address).ok();
+    let section_hashes = header
+        .as_ref()
+        .map(|metadata| compute_section_hashes(module.base_address, metadata))
         .unwrap_or_default();
-    let import_hash = app.opened_process_handle().and_then(|handle| {
-        header
-            .as_ref()
-            .and_then(|metadata| compute_import_hash(handle, module.base_address, metadata))
-    });
+    let import_hash = header
+        .as_ref()
+        .and_then(|metadata| compute_import_hash(module.base_address, metadata));
 
     let fingerprint = ModuleFingerprint {
         build_version: params
@@ -103,7 +90,7 @@ fn get_module_fingerprint(params_json: &str) -> ToolResponse {
             "fingerprint": fingerprint,
             "path": module.path,
             "resolved_module_name": module.name,
-            "header_reader": if header.is_some() { "remote_pe_header" } else { "module_enumeration_fallback" },
+            "header_reader": if header.is_some() { "lua_read_memory" } else { "module_enumeration_fallback" },
         })
         .to_string(),
     }
@@ -130,23 +117,88 @@ struct SectionHeader {
     size_of_raw_data: u32,
 }
 
-fn read_module_pe_metadata(
-    handle: *mut core::ffi::c_void,
-    module_base: usize,
-) -> Result<PeMetadata, String> {
-    let mut bytes = runtime::read_process_memory(handle, module_base, PE_HEADER_READ_SIZE)?;
+fn read_module_pe_metadata(module_base: usize) -> Result<PeMetadata, String> {
+    let mut bytes = read_memory_exact(module_base, PE_HEADER_READ_SIZE)?;
     let e_lfanew = parse_e_lfanew(&bytes)?;
     let minimum = e_lfanew.saturating_add(0x200).min(MAX_PE_HEADER_READ_SIZE);
     if minimum > bytes.len() {
-        bytes = runtime::read_process_memory(handle, module_base, minimum)?;
+        bytes = read_memory_exact(module_base, minimum)?;
     }
 
     let required = required_pe_size(&bytes)?.min(MAX_PE_HEADER_READ_SIZE);
     if required > bytes.len() {
-        bytes = runtime::read_process_memory(handle, module_base, required)?;
+        bytes = read_memory_exact(module_base, required)?;
     }
 
     parse_pe_metadata(&bytes)
+}
+
+fn call_lua_json_tool(method: &str, params: Value) -> Result<Value, String> {
+    let response = lua_backend::call_lua_tool(method, &params.to_string());
+    if !response.success {
+        return Err(response.body_json);
+    }
+
+    serde_json::from_str::<Value>(&response.body_json).map_err(|error| {
+        format!(
+            "lua backend returned invalid json for {}: {}",
+            method, error
+        )
+    })
+}
+
+fn read_memory_exact(address: usize, size: usize) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(size.min(LUA_MEMORY_CHUNK_SIZE));
+    let mut cursor = address;
+    let mut remaining = size;
+
+    while remaining > 0 {
+        let request_size = remaining.min(LUA_MEMORY_CHUNK_SIZE);
+        let chunk = read_memory_chunk(cursor, request_size)?;
+        output.extend_from_slice(&chunk);
+        remaining -= chunk.len();
+        cursor = cursor.saturating_add(chunk.len());
+    }
+
+    Ok(output)
+}
+
+fn read_memory_chunk(address: usize, size: usize) -> Result<Vec<u8>, String> {
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let body = call_lua_json_tool(
+        "read_memory",
+        json!({
+            "address": util::format_address(address),
+            "size": size,
+        }),
+    )?;
+    let bytes = body
+        .get("bytes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "lua read_memory response missing bytes array".to_owned())?;
+
+    let mut output = Vec::with_capacity(bytes.len());
+    for value in bytes {
+        let byte = value
+            .as_u64()
+            .and_then(|number| u8::try_from(number).ok())
+            .ok_or_else(|| "lua read_memory bytes array contained non-byte value".to_owned())?;
+        output.push(byte);
+    }
+
+    if output.len() != size {
+        return Err(format!(
+            "short lua read at {}: expected {} bytes, got {}",
+            util::format_address(address),
+            size,
+            output.len()
+        ));
+    }
+
+    Ok(output)
 }
 
 fn parse_e_lfanew(bytes: &[u8]) -> Result<usize, String> {
@@ -270,11 +322,7 @@ fn parse_pe_metadata(bytes: &[u8]) -> Result<PeMetadata, String> {
     })
 }
 
-fn compute_section_hashes(
-    handle: *mut core::ffi::c_void,
-    module_base: usize,
-    metadata: &PeMetadata,
-) -> BTreeMap<String, String> {
+fn compute_section_hashes(module_base: usize, metadata: &PeMetadata) -> BTreeMap<String, String> {
     let mut section_hashes = BTreeMap::new();
 
     for section in &metadata.sections {
@@ -282,24 +330,36 @@ fn compute_section_hashes(
         if size == 0 {
             continue;
         }
-        let address = module_base.saturating_add(section.virtual_address as usize);
-        let Ok(bytes) = runtime::read_process_memory(handle, address, size) else {
-            continue;
-        };
-        if bytes.is_empty() {
-            continue;
+
+        let mut cursor = module_base.saturating_add(section.virtual_address as usize);
+        let mut remaining = size;
+        let mut digest = md5::Context::new();
+        let mut failed = false;
+
+        while remaining > 0 {
+            let request_size = remaining.min(LUA_MEMORY_CHUNK_SIZE);
+            match read_memory_chunk(cursor, request_size) {
+                Ok(chunk) => {
+                    digest.consume(&chunk);
+                    remaining -= chunk.len();
+                    cursor = cursor.saturating_add(chunk.len());
+                }
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
         }
-        section_hashes.insert(section.name.clone(), format!("{:x}", md5::compute(bytes)));
+
+        if !failed {
+            section_hashes.insert(section.name.clone(), format!("{:x}", digest.compute()));
+        }
     }
 
     section_hashes
 }
 
-fn compute_import_hash(
-    handle: *mut core::ffi::c_void,
-    module_base: usize,
-    metadata: &PeMetadata,
-) -> Option<String> {
+fn compute_import_hash(module_base: usize, metadata: &PeMetadata) -> Option<String> {
     let import_rva = metadata.import_directory_rva?;
     let import_size = metadata.import_directory_size?;
     if import_rva == 0 || import_size == 0 {
@@ -316,7 +376,7 @@ fn compute_import_hash(
     let max_descriptors = (import_size as usize / 20).max(1).min(4096);
 
     for _ in 0..max_descriptors {
-        let bytes = runtime::read_process_memory(handle, descriptor_address, 20).ok()?;
+        let bytes = read_memory_chunk(descriptor_address, 20).ok()?;
         if bytes.len() < 20 {
             break;
         }
@@ -327,8 +387,8 @@ fn compute_import_hash(
             break;
         }
 
-        let dll_name = read_c_string(handle, module_base.saturating_add(name_rva as usize), 256)?
-            .to_ascii_lowercase();
+        let dll_name =
+            read_c_string(module_base.saturating_add(name_rva as usize), 256)?.to_ascii_lowercase();
         let thunk_rva = if original_first_thunk != 0 {
             original_first_thunk
         } else {
@@ -338,13 +398,13 @@ fn compute_import_hash(
 
         for _ in 0..4096 {
             let entry = if thunk_size == 8 {
-                let data = runtime::read_process_memory(handle, thunk_address, 8).ok()?;
+                let data = read_memory_chunk(thunk_address, 8).ok()?;
                 if data.len() < 8 {
                     break;
                 }
                 u64::from_le_bytes(data[0..8].try_into().ok()?)
             } else {
-                let data = runtime::read_process_memory(handle, thunk_address, 4).ok()?;
+                let data = read_memory_chunk(thunk_address, 4).ok()?;
                 if data.len() < 4 {
                     break;
                 }
@@ -362,9 +422,9 @@ fn compute_import_hash(
             if entry & ordinal_flag != 0 {
                 imports.push(format!("{}.#{}", dll_name, entry & 0xFFFF));
             } else {
-                let import_by_name = module_base.saturating_add(entry as usize);
-                let function_name = read_c_string(handle, import_by_name.saturating_add(2), 512)?
-                    .to_ascii_lowercase();
+                let import_by_name = module_base.saturating_add(usize::try_from(entry).ok()?);
+                let function_name =
+                    read_c_string(import_by_name.saturating_add(2), 512)?.to_ascii_lowercase();
                 imports.push(format!("{}.{}", dll_name, function_name));
             }
 
@@ -381,16 +441,33 @@ fn compute_import_hash(
     Some(format!("{:x}", md5::compute(imports.join(","))))
 }
 
-fn read_c_string(handle: *mut core::ffi::c_void, address: usize, max_len: usize) -> Option<String> {
-    let bytes = runtime::read_process_memory(handle, address, max_len).ok()?;
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    if end == 0 {
+fn read_c_string(address: usize, max_len: usize) -> Option<String> {
+    let mut output = Vec::new();
+    let mut cursor = address;
+    let mut remaining = max_len.min(512);
+
+    while remaining > 0 {
+        let chunk = read_memory_chunk(cursor, remaining.min(64)).ok()?;
+        let nul_pos = chunk.iter().position(|byte| *byte == 0);
+        match nul_pos {
+            Some(0) if output.is_empty() => return None,
+            Some(pos) => {
+                output.extend_from_slice(&chunk[..pos]);
+                break;
+            }
+            None => {
+                output.extend_from_slice(&chunk);
+                cursor = cursor.saturating_add(chunk.len());
+                remaining -= chunk.len();
+            }
+        }
+    }
+
+    if output.is_empty() {
         return None;
     }
-    Some(String::from_utf8_lossy(&bytes[..end]).to_string())
+
+    Some(String::from_utf8_lossy(&output).to_string())
 }
 
 fn ensure_range(bytes: &[u8], offset: usize, len: usize, label: &str) -> Result<(), String> {

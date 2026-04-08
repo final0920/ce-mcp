@@ -2,7 +2,6 @@ mod app_state;
 mod config;
 pub mod console;
 mod dispatcher;
-mod scan_state;
 mod winapi;
 
 use std::thread;
@@ -15,12 +14,9 @@ use crate::http::server::StreamableHttpServer;
 use app_state::AppState;
 pub use config::RuntimeConfig;
 use dispatcher::MainThreadDispatcher;
-pub use scan_state::{ScanEntry, ScanSession, ScanValueKind};
+// 仅导出剩余仍在使用的宿主侧 WinAPI 兜底能力；scan 类高层能力与其旧 region helper 已完全移出此层。
 pub use winapi::{
-    enum_memory_regions, enum_modules, enum_threads, is_region_copy_on_write, is_region_executable,
-    is_region_readable, is_region_usable, is_region_writable, protection_to_string,
-    query_process_image_name, read_process_memory, write_process_memory, MemoryRegionInfo,
-    ModuleInfo, MEM_COMMIT, MEM_FREE, MEM_RESERVE,
+    enum_modules, enum_threads, read_process_memory, write_process_memory, ModuleInfo,
 };
 
 static APP_STATE: OnceLock<Arc<AppState>> = OnceLock::new();

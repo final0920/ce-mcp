@@ -6,6 +6,7 @@ mod analysis;
 mod batch;
 mod debug;
 mod fingerprint;
+mod lua_backend;
 mod memory;
 mod process;
 mod scan;
@@ -13,8 +14,13 @@ mod script;
 mod util;
 
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use serde_json::{json, Value};
+
+thread_local! {
+    static MAIN_THREAD_DISPATCH_DEPTH: Cell<usize> = Cell::new(0);
+}
 
 #[derive(Debug, Clone)]
 pub struct ToolResponse {
@@ -28,6 +34,15 @@ pub fn dispatch_p0(method: &str, params_json: &str) -> ToolResponse {
 
 pub fn dispatch(method: &str, params_json: &str) -> ToolResponse {
     dispatch_direct(method, params_json)
+}
+
+pub(crate) fn dispatch_from_main_thread(method: &str, params_json: &str) -> ToolResponse {
+    let _guard = MainThreadDispatchGuard::enter();
+    dispatch_direct(method, params_json)
+}
+
+pub(crate) fn in_main_thread_dispatch() -> bool {
+    MAIN_THREAD_DISPATCH_DEPTH.with(|depth| depth.get() > 0)
 }
 
 pub fn dispatch_direct(method: &str, params_json: &str) -> ToolResponse {
@@ -69,6 +84,7 @@ pub fn requires_serialized_dispatch(method: &str) -> bool {
             | "evaluate_lua_file"
             | "auto_assemble"
             | "auto_assemble_file"
+            | lua_backend::INTERNAL_DISPATCH_METHOD
     )
 }
 
@@ -92,6 +108,9 @@ fn dispatch_canonical(method: &str, params_json: &str) -> ToolResponse {
         return response;
     }
     if let Some(response) = debug::dispatch(method, params_json) {
+        return response;
+    }
+    if let Some(response) = lua_backend::dispatch(method, params_json) {
         return response;
     }
     if let Some(response) = script::dispatch(method, params_json) {
@@ -123,6 +142,21 @@ fn inject_default_param<'a>(params_json: &'a str, key: &str, value: Value) -> Co
 
     object.insert(key.to_owned(), value);
     Cow::Owned(params.to_string())
+}
+
+struct MainThreadDispatchGuard;
+
+impl MainThreadDispatchGuard {
+    fn enter() -> Self {
+        MAIN_THREAD_DISPATCH_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for MainThreadDispatchGuard {
+    fn drop(&mut self) {
+        MAIN_THREAD_DISPATCH_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
 }
 
 #[cfg(test)]

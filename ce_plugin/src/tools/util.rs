@@ -119,31 +119,3 @@ pub fn parse_request_context(params: &Value) -> RequestContext {
         tags,
     }
 }
-
-pub trait FromLeBytes<const N: usize> {
-    fn from_le_bytes(bytes: [u8; N]) -> Self;
-}
-
-impl FromLeBytes<1> for u8 {
-    fn from_le_bytes(bytes: [u8; 1]) -> Self {
-        u8::from_le_bytes(bytes)
-    }
-}
-
-impl FromLeBytes<2> for u16 {
-    fn from_le_bytes(bytes: [u8; 2]) -> Self {
-        u16::from_le_bytes(bytes)
-    }
-}
-
-impl FromLeBytes<4> for u32 {
-    fn from_le_bytes(bytes: [u8; 4]) -> Self {
-        u32::from_le_bytes(bytes)
-    }
-}
-
-impl FromLeBytes<8> for u64 {
-    fn from_le_bytes(bytes: [u8; 8]) -> Self {
-        u64::from_le_bytes(bytes)
-    }
-}

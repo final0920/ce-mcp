@@ -1,6 +1,7 @@
 mod domain;
 mod ffi;
 mod http;
+mod lua;
 mod runtime;
 mod tools;
 

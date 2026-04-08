@@ -444,7 +444,7 @@ impl MainThreadDispatcher {
 
     fn drain_on_main_thread(&self) {
         while let Ok(Some(job)) = self.dequeue_ready_job() {
-            let response = crate::tools::dispatch_direct(&job.method, &job.payload);
+            let response = crate::tools::dispatch_from_main_thread(&job.method, &job.payload);
             let _ = job.finish(response);
         }
     }

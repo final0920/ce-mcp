@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{addressing, util, ToolResponse};
+use super::{addressing, lua_backend, util, ToolResponse};
 use crate::runtime;
 
 const METHODS: &[&str] = &[
@@ -36,6 +36,15 @@ pub fn supported_methods() -> &'static [&'static str] {
 }
 
 pub(crate) fn current_modules() -> Vec<runtime::ModuleInfo> {
+    // 主路径优先走 CE/Lua 后端，避免把 Toolhelp32 枚举重新扩散回业务层。
+    match lua_modules_from_backend() {
+        Ok(modules) => modules,
+        Err(_) => native_current_modules(),
+    }
+}
+
+fn native_current_modules() -> Vec<runtime::ModuleInfo> {
+    // 这里只保留宿主侧兜底：当 Lua 后端不可用时，用 Toolhelp32 给地址归一化/线程工具提供最小模块视图。
     let Some(app) = runtime::app_state() else {
         return Vec::new();
     };
@@ -73,80 +82,165 @@ fn ping() -> ToolResponse {
     }
 }
 
-fn get_process_info() -> ToolResponse {
-    let Some(app) = runtime::app_state() else {
-        return ToolResponse {
-            success: false,
-            body_json: "runtime not initialized".to_owned(),
+fn call_lua_json_tool(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
+    let response = lua_backend::call_lua_tool(method, params_json);
+    if !response.success {
+        return Err(response);
+    }
+
+    serde_json::from_str::<Value>(&response.body_json).map_err(|error| ToolResponse {
+        success: false,
+        body_json: format!(
+            "lua backend returned invalid json for {}: {}",
+            method, error
+        ),
+    })
+}
+
+fn is_no_process_attached_response(response: &ToolResponse) -> bool {
+    response.body_json.contains("No process attached")
+}
+
+fn unattached_process_info_body() -> Value {
+    json!({
+        "success": true,
+        "process_id": 0,
+        "attached": false,
+        "process_name": "unattached",
+        "module_count": 0,
+        "modules": [],
+        "main_module": Value::Null,
+        "architecture": "x64",
+        "note": "no process attached (lua backend)"
+    })
+}
+
+fn lua_process_attached() -> Result<bool, ToolResponse> {
+    match call_lua_json_tool("get_process_info", "{}") {
+        Ok(body) => Ok(body.get("process_id").and_then(Value::as_u64).unwrap_or(0) != 0),
+        Err(response) if is_no_process_attached_response(&response) => Ok(false),
+        Err(response) => Err(response),
+    }
+}
+
+fn lua_module_from_value(value: &Value) -> Option<runtime::ModuleInfo> {
+    let address = util::parse_address(value.get("address")).ok()?;
+    Some(runtime::ModuleInfo {
+        name: value
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("???")
+            .to_owned(),
+        base_address: address,
+        size: value
+            .get("size")
+            .and_then(Value::as_u64)
+            .and_then(|size| u32::try_from(size).ok())
+            .unwrap_or(0),
+        path: value
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    })
+}
+
+fn enrich_lua_modules_in_place(body: &mut Value) -> Vec<runtime::ModuleInfo> {
+    let Some(modules) = body.get_mut("modules").and_then(Value::as_array_mut) else {
+        return Vec::new();
+    };
+
+    let mut parsed = Vec::with_capacity(modules.len());
+    for module in modules.iter_mut() {
+        let Some(info) = lua_module_from_value(module) else {
+            continue;
         };
-    };
 
-    let process_id = app.opened_process_id().unwrap_or(0);
-    let attached = process_id != 0;
-    let process_name = app
-        .opened_process_handle()
-        .and_then(|handle| runtime::query_process_image_name(handle).ok())
-        .unwrap_or_else(|| {
-            if attached {
-                "attached-process".to_owned()
-            } else {
-                "unattached".to_owned()
+        if let Some(object) = module.as_object_mut() {
+            if !object.contains_key("path") {
+                object.insert("path".to_owned(), json!(info.path.clone()));
             }
-        });
-    let modules = if attached {
-        runtime::enum_modules(process_id).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let modules_json = modules
-        .iter()
-        .map(|module| {
-            json!({
-                "name": module.name,
-                "address": util::format_address(module.base_address),
-                "size": module.size,
-                "path": module.path,
-                "normalized": addressing::normalized_module_metadata(module),
-            })
-        })
-        .collect::<Vec<_>>();
-    let main_module = modules.first().map(|module| {
-        json!({
-            "module_name": module.name,
-            "module_base": util::format_address(module.base_address),
-            "size": module.size,
-            "path": module.path,
-            "normalized": addressing::normalized_module_metadata(module),
-        })
-    });
+            if !object.contains_key("normalized") {
+                object.insert(
+                    "normalized".to_owned(),
+                    addressing::normalized_module_metadata(&info),
+                );
+            }
+        }
 
-    ToolResponse {
-        success: true,
-        body_json: json!({
-            "success": true,
-            "process_id": process_id,
-            "attached": attached,
-            "process_name": process_name,
-            "module_count": modules_json.len(),
-            "modules": modules_json,
-            "main_module": main_module,
-            "architecture": "x64",
-            "note": "live process response; symbol/rtti integration pending"
-        })
-        .to_string(),
+        parsed.push(info);
+    }
+
+    parsed
+}
+
+fn lua_modules_from_backend() -> Result<Vec<runtime::ModuleInfo>, ToolResponse> {
+    let mut body = match call_lua_json_tool("enum_modules", "{}") {
+        Ok(value) => value,
+        Err(response) if is_no_process_attached_response(&response) => return Ok(Vec::new()),
+        Err(response) => return Err(response),
+    };
+
+    Ok(enrich_lua_modules_in_place(&mut body))
+}
+
+fn main_module_json(module: &runtime::ModuleInfo) -> Value {
+    json!({
+        "module_name": module.name,
+        "module_base": util::format_address(module.base_address),
+        "size": module.size,
+        "path": module.path,
+        "normalized": addressing::normalized_module_metadata(module),
+    })
+}
+
+fn get_process_info() -> ToolResponse {
+    match call_lua_json_tool("get_process_info", "{}") {
+        Ok(mut body) => {
+            let modules = enrich_lua_modules_in_place(&mut body);
+            let attached = body.get("process_id").and_then(Value::as_u64).unwrap_or(0) != 0;
+
+            if let Some(object) = body.as_object_mut() {
+                object.insert("success".to_owned(), Value::Bool(true));
+                object.insert("attached".to_owned(), Value::Bool(attached));
+                object.insert("module_count".to_owned(), json!(modules.len()));
+                if !object.contains_key("architecture") {
+                    object.insert("architecture".to_owned(), json!("x64"));
+                }
+                if !object.contains_key("note") {
+                    object.insert(
+                        "note".to_owned(),
+                        json!("live process response via embedded lua backend"),
+                    );
+                }
+                if !object.contains_key("main_module") {
+                    object.insert(
+                        "main_module".to_owned(),
+                        modules.first().map(main_module_json).unwrap_or(Value::Null),
+                    );
+                }
+            }
+
+            ToolResponse {
+                success: true,
+                body_json: body.to_string(),
+            }
+        }
+        Err(response) if is_no_process_attached_response(&response) => ToolResponse {
+            success: true,
+            body_json: unattached_process_info_body().to_string(),
+        },
+        Err(response) => response,
     }
 }
 
 fn enum_modules() -> ToolResponse {
-    let Some(app) = runtime::app_state() else {
-        return ToolResponse {
-            success: false,
-            body_json: "runtime not initialized".to_owned(),
-        };
+    let attached = match lua_process_attached() {
+        Ok(attached) => attached,
+        Err(response) => return response,
     };
 
-    let process_id = app.opened_process_id().unwrap_or(0);
-    if process_id == 0 {
+    if !attached {
         return ToolResponse {
             success: true,
             body_json: json!({
@@ -159,27 +253,21 @@ fn enum_modules() -> ToolResponse {
         };
     }
 
-    match runtime::enum_modules(process_id) {
-        Ok(modules) => ToolResponse {
-            success: true,
-            body_json: json!({
-                "success": true,
-                "count": modules.len(),
-                "modules": modules.into_iter().map(|module| json!({
-                    "name": module.name,
-                    "address": util::format_address(module.base_address),
-                    "size": module.size,
-                    "is_64bit": true,
-                    "path": module.path,
-                    "normalized": addressing::normalized_module_metadata(&module),
-                })).collect::<Vec<_>>(),
-            })
-            .to_string(),
-        },
-        Err(error) => ToolResponse {
-            success: false,
-            body_json: error,
-        },
+    let mut body = match call_lua_json_tool("enum_modules", "{}") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let modules = enrich_lua_modules_in_place(&mut body);
+
+    if let Some(object) = body.as_object_mut() {
+        object.insert("success".to_owned(), Value::Bool(true));
+        object.insert("count".to_owned(), json!(modules.len()));
+        object.insert("attached".to_owned(), Value::Bool(true));
+    }
+
+    ToolResponse {
+        success: true,
+        body_json: body.to_string(),
     }
 }
 
@@ -321,12 +409,6 @@ pub(crate) fn address_info_json(
 }
 
 fn get_address_info(params_json: &str) -> ToolResponse {
-    let Some(_app) = runtime::app_state() else {
-        return ToolResponse {
-            success: false,
-            body_json: "runtime not initialized".to_owned(),
-        };
-    };
     let params = match util::parse_params(params_json) {
         Ok(value) => value,
         Err(error) => return error_response(error),
@@ -344,22 +426,72 @@ fn get_address_info(params_json: &str) -> ToolResponse {
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let modules = current_modules();
-    let address = match resolve_address_param(params.get("address"), &modules) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
+    let lua_body = match call_lua_json_tool("get_address_info", params_json) {
+        Ok(value) => value,
+        Err(response) => return response,
     };
+    let address = match util::parse_address(lua_body.get("address")) {
+        Ok(address) => address,
+        Err(error) => {
+            return error_response(format!(
+                "lua backend get_address_info returned invalid address: {}",
+                error
+            ))
+        }
+    };
+    let modules = match lua_modules_from_backend() {
+        Ok(modules) => modules,
+        Err(response) => return response,
+    };
+
+    let mut body = address_info_json(
+        address,
+        &modules,
+        include_modules,
+        include_symbols,
+        include_sections,
+    );
+
+    if let (Some(lua_object), Some(body_object)) = (lua_body.as_object(), body.as_object_mut()) {
+        if let Some(symbolic_name) = lua_object.get("symbolic_name") {
+            body_object.insert("symbolic_name".to_owned(), symbolic_name.clone());
+        }
+        if let Some(is_in_module) = lua_object.get("is_in_module") {
+            if is_in_module.as_bool().unwrap_or(false) {
+                body_object.insert("has_module_match".to_owned(), Value::Bool(true));
+            }
+            body_object.insert("is_in_module".to_owned(), is_in_module.clone());
+        }
+        if let Some(options_used) = lua_object.get("options_used") {
+            body_object.insert("options_used".to_owned(), options_used.clone());
+        }
+        if include_symbols {
+            let has_symbol = body_object
+                .get("symbol")
+                .map(|value| !value.is_null())
+                .unwrap_or(false);
+            let symbolic_name = lua_object.get("symbolic_name").and_then(Value::as_str);
+            let address_text = lua_object.get("address").and_then(Value::as_str);
+            if !has_symbol {
+                if let Some(symbolic_name) = symbolic_name {
+                    if Some(symbolic_name) != address_text {
+                        body_object.insert(
+                            "symbol".to_owned(),
+                            json!({
+                                "name": symbolic_name,
+                                "kind": "lua_symbolic_name",
+                                "resolved_by": "lua_backend",
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     ToolResponse {
         success: true,
-        body_json: address_info_json(
-            address,
-            &modules,
-            include_modules,
-            include_symbols,
-            include_sections,
-        )
-        .to_string(),
+        body_json: body.to_string(),
     }
 }
 
@@ -398,9 +530,6 @@ fn get_rtti_classname(params_json: &str) -> ToolResponse {
             body_json: "runtime not initialized".to_owned(),
         };
     };
-    let Some(handle) = app.opened_process_handle() else {
-        return error_response("process handle unavailable".to_owned());
-    };
     let params = match util::parse_params(params_json) {
         Ok(value) => value,
         Err(error) => return error_response(error),
@@ -412,32 +541,74 @@ fn get_rtti_classname(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    match resolve_rtti_classname(handle, address, &modules) {
+    let lua_result = lua_rtti_classname(address, &modules);
+    if let Ok(body) = &lua_result {
+        if body.get("found").and_then(Value::as_bool).unwrap_or(false) {
+            return ToolResponse {
+                success: true,
+                body_json: body.to_string(),
+            };
+        }
+    }
+
+    let Some(handle) = app.opened_process_handle() else {
+        return match lua_result {
+            Ok(body) => ToolResponse {
+                success: true,
+                body_json: body.to_string(),
+            },
+            Err(error) => error_response(format!(
+                "process handle unavailable and lua RTTI lookup failed: {}",
+                error
+            )),
+        };
+    };
+
+    match resolve_rtti_classname_native(handle, address, &modules) {
         Ok(Some(result)) => ToolResponse {
             success: true,
             body_json: json!({
                 "success": true,
                 "address": util::format_address(address),
+                "normalized_address": addressing::normalize_address_from_modules(address, &modules),
                 "class_name": result.class_name,
                 "decorated_name": result.decorated_name,
                 "found": true,
                 "rtti_module": result.module_name,
-                "resolver": "msvc_x64_rtti",
+                "resolver": "msvc_x64_rtti_fallback",
             })
             .to_string(),
         },
-        Ok(None) => ToolResponse {
-            success: true,
-            body_json: json!({
-                "success": true,
-                "address": util::format_address(address),
-                "class_name": Value::Null,
-                "found": false,
-                "note": "No MSVC x64 RTTI information found at this address",
-            })
-            .to_string(),
+        Ok(None) => match lua_result {
+            Ok(body) => ToolResponse {
+                success: true,
+                body_json: body.to_string(),
+            },
+            Err(_) => ToolResponse {
+                success: true,
+                body_json: json!({
+                    "success": true,
+                    "address": util::format_address(address),
+                    "normalized_address": addressing::normalize_address_from_modules(address, &modules),
+                    "class_name": Value::Null,
+                    "decorated_name": Value::Null,
+                    "found": false,
+                    "rtti_module": Value::Null,
+                    "resolver": "msvc_x64_rtti_fallback",
+                    "note": "No RTTI information found at this address",
+                })
+                .to_string(),
+            },
         },
-        Err(error) => error_response(error),
+        Err(error) => match lua_result {
+            Ok(body) => ToolResponse {
+                success: true,
+                body_json: body.to_string(),
+            },
+            Err(lua_error) => {
+                error_response(format!("lua RTTI lookup failed: {}; native fallback failed: {}", lua_error, error))
+            }
+        },
     }
 }
 
@@ -562,7 +733,36 @@ struct RttiClassResult {
     module_name: Option<String>,
 }
 
-fn resolve_rtti_classname(
+fn lua_rtti_classname(address: usize, modules: &[runtime::ModuleInfo]) -> Result<Value, String> {
+    let mut body = call_lua_json_tool(
+        "get_rtti_classname",
+        &json!({ "address": util::format_address(address) }).to_string(),
+    )
+    .map_err(|response| response.body_json)?;
+    let Some(object) = body.as_object_mut() else {
+        return Err("lua get_rtti_classname returned non-object body".to_owned());
+    };
+
+    object.insert("success".to_owned(), Value::Bool(true));
+    object.insert("address".to_owned(), json!(util::format_address(address)));
+    object.insert(
+        "normalized_address".to_owned(),
+        json!(addressing::normalize_address_from_modules(address, modules)),
+    );
+    object
+        .entry("decorated_name".to_owned())
+        .or_insert(Value::Null);
+    object
+        .entry("rtti_module".to_owned())
+        .or_insert(Value::Null);
+    object
+        .entry("resolver".to_owned())
+        .or_insert(json!("ce_getRTTIClassName"));
+
+    Ok(body)
+}
+
+fn resolve_rtti_classname_native(
     handle: *mut core::ffi::c_void,
     object_address: usize,
     modules: &[runtime::ModuleInfo],

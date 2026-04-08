@@ -1,10 +1,7 @@
-use core::ffi::c_void;
-
-use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter, Mnemonic};
 use serde_json::{json, Value};
 
-use super::{addressing, util, ToolResponse};
-use crate::runtime;
+use super::{addressing, lua_backend, process, util, ToolResponse};
+use crate::runtime::ModuleInfo;
 
 const METHODS: &[&str] = &[
     "disassemble",
@@ -15,9 +12,6 @@ const METHODS: &[&str] = &[
     "find_call_references",
     "dissect_structure",
 ];
-const MAX_DISASSEMBLY_COUNT: usize = 256;
-const MAX_DISASSEMBLY_BYTES: usize = 4096;
-const MAX_INSTRUCTION_BYTES: usize = 15;
 
 pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
     let response = match method {
@@ -40,783 +34,697 @@ pub fn supported_methods() -> &'static [&'static str] {
 }
 
 fn disassemble(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
-    };
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-    let address = match util::parse_address(params.get("address")) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
-    };
-    let count = parse_usize(params.get("count"), 20, MAX_DISASSEMBLY_COUNT);
-    let bytes_to_read = count
-        .saturating_mul(MAX_INSTRUCTION_BYTES)
-        .min(MAX_DISASSEMBLY_BYTES)
-        .max(MAX_INSTRUCTION_BYTES);
+    let response = lua_backend::call_lua_tool("disassemble", params_json);
+    if !response.success {
+        return response;
+    }
 
-    let bytes = match runtime::read_process_memory(handle, address, bytes_to_read) {
-        Ok(bytes) => bytes,
-        Err(error) => return error_response(error),
-    };
-
-    let modules = current_modules();
-    let instructions = decode_instructions(address, &bytes, count, &modules);
-    ToolResponse {
-        success: true,
-        body_json: json!({
-            "success": true,
-            "address": util::format_address(address),
-            "normalized_address": addressing::normalize_address_from_modules(address, &modules),
-            "count": instructions.len(),
-            "instructions": instructions,
-        })
-        .to_string(),
+    match normalize_lua_disassemble_response(&response.body_json) {
+        Ok(body_json) => ToolResponse {
+            success: true,
+            body_json,
+        },
+        Err(error) => error_response(error),
     }
 }
 
 fn get_instruction_info(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
-    };
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-    let address = match util::parse_address(params.get("address")) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
+    let body = match call_lua_tool_json("get_instruction_info", params_json) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
 
-    let bytes = match runtime::read_process_memory(handle, address, MAX_INSTRUCTION_BYTES) {
-        Ok(bytes) => bytes,
-        Err(error) => return error_response(error),
-    };
-
-    let modules = current_modules();
-    let instruction = match decode_one_instruction(address, &bytes, &modules) {
-        Ok(instruction) => instruction,
-        Err(error) => return error_response(error),
-    };
-
-    ToolResponse {
-        success: true,
-        body_json: json!({
-            "success": true,
-            "address": util::format_address(address),
-            "normalized_address": addressing::normalize_address_from_modules(address, &modules),
-            "instruction": instruction,
-        })
-        .to_string(),
+    match normalize_lua_instruction_info_response(body) {
+        Ok(body_json) => ToolResponse {
+            success: true,
+            body_json,
+        },
+        Err(error) => error_response(error),
     }
 }
 
 fn find_function_boundaries(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
+    let body = match call_lua_tool_json("find_function_boundaries", params_json) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-    let address = match util::parse_address(params.get("address")) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
-    };
-    let max_search = parse_usize(params.get("max_search"), 4096, 0x20_000);
 
-    match locate_function_boundaries(handle, address, max_search) {
-        Ok(boundary) => {
-            let modules = current_modules();
-            ToolResponse {
-                success: true,
-                body_json: json!({
-                    "success": true,
-                    "found": true,
-                    "query_address": util::format_address(address),
-                    "query_normalized_address": addressing::normalize_address_from_modules(address, &modules),
-                    "function_start": util::format_address(boundary.start),
-                    "function_start_normalized": addressing::normalize_address_from_modules(boundary.start, &modules),
-                    "function_end": boundary.end.map(util::format_address),
-                    "function_end_normalized": boundary.end.and_then(|end| addressing::normalize_address_from_modules(end, &modules)),
-                    "function_size": boundary.end.map(|end| end.saturating_sub(boundary.start).saturating_add(1)),
-                    "prologue_type": boundary.prologue_type,
-                    "arch": "x64",
-                    "note": boundary.note,
-                })
-                .to_string(),
-            }
-        }
-        Err(error) => ToolResponse {
+    match normalize_lua_function_boundaries_response(body) {
+        Ok(body_json) => ToolResponse {
             success: true,
-            body_json: json!({
-                "success": true,
-                "found": false,
-                "query_address": util::format_address(address),
-                "arch": "x64",
-                "note": error,
-            })
-            .to_string(),
+            body_json,
         },
+        Err(error) => error_response(error),
     }
 }
 
 fn analyze_function(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
-    };
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-    let address = match util::parse_address(params.get("address")) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
+    let body = match call_lua_tool_json("analyze_function", params_json) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
 
-    let boundary = match locate_function_boundaries(handle, address, 4096) {
-        Ok(boundary) => boundary,
-        Err(error) => return error_response(error),
-    };
-    let end = boundary
-        .end
-        .unwrap_or_else(|| boundary.start.saturating_add(MAX_DISASSEMBLY_BYTES));
-    let byte_len = end
-        .saturating_sub(boundary.start)
-        .saturating_add(1)
-        .min(MAX_DISASSEMBLY_BYTES);
-    let bytes = match runtime::read_process_memory(
-        handle,
-        boundary.start,
-        byte_len.max(MAX_INSTRUCTION_BYTES),
-    ) {
-        Ok(bytes) => bytes,
-        Err(error) => return error_response(error),
-    };
-
-    let modules = current_modules();
-    let decoded = decode_instruction_records(boundary.start, &bytes, MAX_DISASSEMBLY_COUNT);
-    let mut calls = Vec::new();
-    for record in &decoded {
-        if flow_control_is_call(record.instruction.flow_control()) {
-            calls.push(json!({
-                "call_site": util::format_address(record.address),
-                "call_site_normalized": addressing::normalize_address_from_modules(record.address, &modules),
-                "instruction": record.text,
-                "target": record.branch_target.map(util::format_address),
-                "target_normalized": record.branch_target.and_then(|target| addressing::normalize_address_from_modules(target, &modules)),
-                "type": if record.branch_target.is_some() { "direct" } else { "indirect" },
-            }));
-        }
-    }
-
-    ToolResponse {
-        success: true,
-        body_json: json!({
-            "success": true,
-            "function_start": util::format_address(boundary.start),
-            "function_start_normalized": addressing::normalize_address_from_modules(boundary.start, &modules),
-            "function_end": boundary.end.map(util::format_address),
-            "function_end_normalized": boundary.end.and_then(|end| addressing::normalize_address_from_modules(end, &modules)),
-            "prologue_type": boundary.prologue_type,
-            "arch": "x64",
-            "instruction_count": decoded.len(),
-            "call_count": calls.len(),
-            "calls": calls,
-            "note": boundary.note,
-        })
-        .to_string(),
+    match normalize_lua_analyze_function_response(body) {
+        Ok(body_json) => ToolResponse {
+            success: true,
+            body_json,
+        },
+        Err(error) => error_response(error),
     }
 }
 
 fn find_references(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
+    let modules = process::current_modules();
+    let mut body = match call_lua_tool_json("find_references", params_json) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-    let target = match util::parse_address(params.get("address")) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
-    };
-    let limit = parse_usize(params.get("limit"), 50, 500);
 
-    let modules = current_modules();
-    let references = match collect_references(handle, target, limit, false, &modules) {
-        Ok(references) => references,
-        Err(error) => return error_response(error),
+    let target_text = body
+        .get("target")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let target_normalized = response_address(body.get("target"))
+        .and_then(|target| addressing::normalize_address_from_modules(target, &modules));
+    let references_count = body
+        .get("references")
+        .and_then(Value::as_array)
+        .map(|references| references.len())
+        .unwrap_or(0);
+
+    if let Some(references) = body.get_mut("references").and_then(Value::as_array_mut) {
+        for reference in references.iter_mut() {
+            let Some(object) = reference.as_object_mut() else {
+                continue;
+            };
+
+            let normalized_address = response_address(object.get("address"))
+                .and_then(|address| addressing::normalize_address_from_modules(address, &modules));
+            object.insert("normalized_address".to_owned(), json!(normalized_address));
+            if let Some(target) = target_text.as_ref() {
+                object
+                    .entry("target".to_owned())
+                    .or_insert_with(|| Value::String(target.clone()));
+            }
+            object
+                .entry("target_normalized".to_owned())
+                .or_insert_with(|| json!(target_normalized.clone()));
+        }
+    }
+
+    let Some(object) = body.as_object_mut() else {
+        return error_response("lua find_references returned non-object body".to_owned());
     };
+
+    object.insert("target_normalized".to_owned(), json!(target_normalized));
+    object
+        .entry("count".to_owned())
+        .or_insert_with(|| json!(references_count));
+    object
+        .entry("arch".to_owned())
+        .or_insert_with(|| json!("x64"));
+    object
+        .entry("note".to_owned())
+        .or_insert_with(|| json!("reference scan via embedded lua backend"));
 
     ToolResponse {
         success: true,
-        body_json: json!({
-            "success": true,
-            "target": util::format_address(target),
-            "target_normalized": addressing::normalize_address_from_modules(target, &modules),
-            "count": references.len(),
-            "references": references,
-            "arch": "x64",
-            "note": "native reference scan currently covers direct branch targets and RIP-relative memory references in executable regions",
-        })
-        .to_string(),
+        body_json: body.to_string(),
     }
 }
 
 fn find_call_references(params_json: &str) -> ToolResponse {
-    let Some(handle) = opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
-    };
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-    let target = match util::parse_address(
-        params
-            .get("function_address")
-            .or_else(|| params.get("address")),
-    ) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
-    };
-    let limit = parse_usize(params.get("limit"), 100, 1000);
-
-    let modules = current_modules();
-    let callers = match collect_references(handle, target, limit, true, &modules) {
-        Ok(references) => references,
-        Err(error) => return error_response(error),
+    let body = match call_lua_tool_json("find_call_references", params_json) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
 
-    ToolResponse {
-        success: true,
-        body_json: json!({
-            "success": true,
-            "function_address": util::format_address(target),
-            "function_address_normalized": addressing::normalize_address_from_modules(target, &modules),
-            "count": callers.len(),
-            "callers": callers,
-            "arch": "x64",
-        })
-        .to_string(),
+    match normalize_lua_find_call_references_response(body) {
+        Ok(body_json) => ToolResponse {
+            success: true,
+            body_json,
+        },
+        Err(error) => error_response(error),
     }
 }
 
 fn dissect_structure(params_json: &str) -> ToolResponse {
-    let Some(app) = runtime::app_state() else {
-        return runtime_unavailable("runtime not initialized");
+    let body = match call_lua_tool_json("dissect_structure", params_json) {
+        Ok(body) => body,
+        Err(response) => return response,
     };
-    let Some(handle) = app.opened_process_handle() else {
-        return runtime_unavailable("process handle unavailable");
-    };
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-    let address = match util::parse_address(params.get("address")) {
-        Ok(address) => address,
-        Err(error) => return error_response(error),
-    };
-    let size = parse_usize(params.get("size"), 256, 2048);
 
-    let bytes = match runtime::read_process_memory(handle, address, size) {
-        Ok(bytes) => bytes,
-        Err(error) => return error_response(error),
-    };
-    let process_id = app.opened_process_id().unwrap_or(0);
-    let modules = if process_id != 0 {
-        runtime::enum_modules(process_id).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let regions = runtime::enum_memory_regions(handle, None).unwrap_or_default();
+    match normalize_lua_dissect_structure_response(body) {
+        Ok(body_json) => ToolResponse {
+            success: true,
+            body_json,
+        },
+        Err(error) => error_response(error),
+    }
+}
 
-    let mut elements = Vec::new();
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        if let Some((byte_len, value)) = detect_ascii_string(&bytes[offset..]) {
-            elements.push(json!({
-                "offset": offset,
-                "hex_offset": format!("+0x{:X}", offset),
-                "name": format!("field_{:04X}", offset),
-                "vartype": "ascii_string",
-                "bytesize": byte_len,
-                "current_value": value,
-                "confidence": "medium",
-            }));
-            offset = offset.saturating_add(align_up(byte_len, 4));
-            continue;
+fn normalize_lua_disassemble_response(body_json: &str) -> Result<String, String> {
+    let mut body: Value = serde_json::from_str(body_json)
+        .map_err(|error| format!("invalid lua disassemble result json: {}", error))?;
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| "lua disassemble result must be a json object".to_owned())?;
+
+    let modules = process::current_modules();
+    let address_value = object
+        .get("address")
+        .cloned()
+        .or_else(|| object.get("start_address").cloned());
+    let address = address_value
+        .as_ref()
+        .and_then(|value| util::parse_address(Some(value)).ok());
+
+    if !object.contains_key("address") {
+        if let Some(value) = address_value.clone() {
+            object.insert("address".to_owned(), value);
         }
+    }
+    if !object.contains_key("normalized_address") {
+        object.insert(
+            "normalized_address".to_owned(),
+            json!(address
+                .and_then(|value| addressing::normalize_address_from_modules(value, &modules))),
+        );
+    }
 
-        if let Some((byte_len, value)) = detect_utf16_string(&bytes[offset..]) {
-            elements.push(json!({
-                "offset": offset,
-                "hex_offset": format!("+0x{:X}", offset),
-                "name": format!("field_{:04X}", offset),
-                "vartype": "utf16_string",
-                "bytesize": byte_len,
-                "current_value": value,
-                "confidence": "medium",
-            }));
-            offset = offset.saturating_add(align_up(byte_len, 4));
-            continue;
-        }
+    let instruction_count =
+        if let Some(instructions) = object.get_mut("instructions").and_then(Value::as_array_mut) {
+            for instruction in instructions.iter_mut() {
+                let Some(instruction_object) = instruction.as_object_mut() else {
+                    continue;
+                };
 
-        if offset % 8 == 0 && offset + 8 <= bytes.len() {
-            let pointer =
-                u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap_or([0; 8])) as usize;
-            if let Some(pointer_info) = describe_pointer(pointer, &modules, &regions) {
-                elements.push(json!({
-                    "offset": offset,
-                    "hex_offset": format!("+0x{:X}", offset),
-                    "name": format!("field_{:04X}", offset),
-                    "vartype": "pointer",
-                    "bytesize": 8,
-                    "current_value": util::format_address(pointer),
-                    "target": pointer_info,
-                    "confidence": "high",
-                }));
-                offset = offset.saturating_add(8);
-                continue;
+                let instruction_address = instruction_object
+                    .get("address")
+                    .and_then(|value| util::parse_address(Some(value)).ok());
+                let instruction_size = instruction_object
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok());
+                let next_address = instruction_address
+                    .zip(instruction_size)
+                    .map(|(addr, size)| addr.saturating_add(size));
+
+                if !instruction_object.contains_key("text") {
+                    if let Some(text) = instruction_object.get("instruction").cloned() {
+                        instruction_object.insert("text".to_owned(), text);
+                    }
+                }
+                if !instruction_object.contains_key("length") {
+                    if let Some(size) = instruction_object.get("size").cloned() {
+                        instruction_object.insert("length".to_owned(), size);
+                    }
+                }
+                if !instruction_object.contains_key("normalized_address") {
+                    instruction_object.insert(
+                        "normalized_address".to_owned(),
+                        json!(instruction_address.and_then(|value| {
+                            addressing::normalize_address_from_modules(value, &modules)
+                        })),
+                    );
+                }
+                if !instruction_object.contains_key("next_address") {
+                    instruction_object.insert(
+                        "next_address".to_owned(),
+                        json!(next_address.map(util::format_address)),
+                    );
+                }
+                if !instruction_object.contains_key("next_address_normalized") {
+                    instruction_object.insert(
+                        "next_address_normalized".to_owned(),
+                        json!(next_address.and_then(|value| {
+                            addressing::normalize_address_from_modules(value, &modules)
+                        })),
+                    );
+                }
+                if !instruction_object.contains_key("mnemonic") {
+                    if let Some(mnemonic) = instruction_object
+                        .get("instruction")
+                        .and_then(Value::as_str)
+                        .and_then(|text| text.split_whitespace().next())
+                    {
+                        instruction_object
+                            .insert("mnemonic".to_owned(), json!(mnemonic.to_ascii_lowercase()));
+                    }
+                }
             }
-        }
 
-        if offset + 4 <= bytes.len() {
-            let raw = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or([0; 4]));
-            let float = f32::from_le_bytes(raw.to_le_bytes());
-            let (vartype, current_value, confidence) = if looks_reasonable_float(float) {
-                ("float", json!(float), "low")
-            } else {
-                ("dword", json!(raw), "low")
-            };
-            elements.push(json!({
-                "offset": offset,
-                "hex_offset": format!("+0x{:X}", offset),
-                "name": format!("field_{:04X}", offset),
-                "vartype": vartype,
-                "bytesize": 4,
-                "current_value": current_value,
-                "confidence": confidence,
-            }));
-            offset = offset.saturating_add(4);
-            continue;
-        }
-
-        elements.push(json!({
-            "offset": offset,
-            "hex_offset": format!("+0x{:X}", offset),
-            "name": format!("field_{:04X}", offset),
-            "vartype": "byte",
-            "bytesize": 1,
-            "current_value": bytes[offset],
-            "confidence": "low",
-        }));
-        offset += 1;
-    }
-
-    ToolResponse {
-        success: true,
-        body_json: json!({
-            "success": true,
-            "base_address": util::format_address(address),
-            "size_analyzed": bytes.len(),
-            "element_count": elements.len(),
-            "elements": elements,
-            "resolver": "native_heuristic",
-            "note": "heuristic structure inference from readable memory; not CE autoGuess parity",
-        })
-        .to_string(),
-    }
-}
-
-fn decode_instructions(
-    address: usize,
-    bytes: &[u8],
-    count: usize,
-    modules: &[runtime::ModuleInfo],
-) -> Vec<Value> {
-    decode_instruction_records(address, bytes, count)
-        .into_iter()
-        .map(|record| {
-            json!({
-                "address": util::format_address(record.address),
-                "normalized_address": addressing::normalize_address_from_modules(record.address, modules),
-                "bytes": record.bytes_text,
-                "text": record.text,
-                "mnemonic": format_mnemonic(record.instruction.mnemonic()),
-                "length": record.instruction.len(),
-                "next_address": util::format_address(record.instruction.next_ip() as usize),
-                "next_address_normalized": addressing::normalize_address_from_modules(record.instruction.next_ip() as usize, modules),
-            })
-        })
-        .collect()
-}
-
-fn decode_one_instruction(
-    address: usize,
-    bytes: &[u8],
-    modules: &[runtime::ModuleInfo],
-) -> Result<Value, String> {
-    let record = decode_instruction_records(address, bytes, 1)
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("invalid instruction at {}", util::format_address(address)))?;
-
-    Ok(json!({
-        "address": util::format_address(address),
-        "normalized_address": addressing::normalize_address_from_modules(address, modules),
-        "bytes": record.bytes_text,
-        "text": record.text,
-        "mnemonic": format_mnemonic(record.instruction.mnemonic()),
-        "length": record.instruction.len() as usize,
-        "next_address": util::format_address(record.instruction.next_ip() as usize),
-        "next_address_normalized": addressing::normalize_address_from_modules(record.instruction.next_ip() as usize, modules),
-        "op_count": record.instruction.op_count(),
-        "is_invalid": false,
-        "is_stack_instruction": record.instruction.is_stack_instruction(),
-        "flow_control": format!("{:?}", record.instruction.flow_control()).to_ascii_lowercase(),
-        "near_branch_target": record.branch_target.map(util::format_address),
-        "near_branch_target_normalized": record.branch_target.and_then(|target| addressing::normalize_address_from_modules(target, modules)),
-        "is_ip_rel_memory_operand": record.instruction.is_ip_rel_memory_operand(),
-        "ip_rel_memory_address": record
-            .instruction
-            .is_ip_rel_memory_operand()
-            .then(|| util::format_address(record.instruction.ip_rel_memory_address() as usize)),
-    }))
-}
-
-#[derive(Clone)]
-struct DecodedRecord {
-    address: usize,
-    instruction: iced_x86::Instruction,
-    text: String,
-    bytes_text: String,
-    branch_target: Option<usize>,
-}
-
-#[derive(Clone)]
-struct FunctionBoundary {
-    start: usize,
-    end: Option<usize>,
-    prologue_type: &'static str,
-    note: Option<String>,
-}
-
-fn decode_instruction_records(address: usize, bytes: &[u8], count: usize) -> Vec<DecodedRecord> {
-    let mut decoder = Decoder::with_ip(64, bytes, address as u64, DecoderOptions::NONE);
-    let mut formatter = IntelFormatter::new();
-    let mut records = Vec::new();
-
-    while decoder.can_decode() && records.len() < count {
-        let instruction = decoder.decode();
-        if instruction.is_invalid() {
-            break;
-        }
-
-        let start = instruction.ip().saturating_sub(address as u64) as usize;
-        let len = instruction.len() as usize;
-        let end = start.saturating_add(len).min(bytes.len());
-        let instr_bytes = &bytes[start..end];
-        let mut text = String::new();
-        formatter.format(&instruction, &mut text);
-        let branch_target = if flow_control_has_branch_target(instruction.flow_control()) {
-            Some(instruction.near_branch_target() as usize)
+            Some(instructions.len())
         } else {
             None
         };
 
-        records.push(DecodedRecord {
-            address: instruction.ip() as usize,
-            instruction,
-            text,
-            bytes_text: format_instruction_bytes(instr_bytes),
-            branch_target,
-        });
+    if let Some(instruction_count) = instruction_count {
+        object.insert("count".to_owned(), json!(instruction_count));
     }
 
-    records
+    Ok(body.to_string())
 }
 
-fn locate_function_boundaries(
-    handle: *mut c_void,
+fn normalize_lua_instruction_info_response(mut body: Value) -> Result<String, String> {
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| "lua get_instruction_info returned non-object body".to_owned())?;
+    let modules = process::current_modules();
+    let address = response_address(object.get("address"))
+        .ok_or_else(|| "lua get_instruction_info response missing address".to_owned())?;
+
+    object.insert("address".to_owned(), json!(util::format_address(address)));
+    object.insert(
+        "normalized_address".to_owned(),
+        json!(addressing::normalize_address_from_modules(
+            address, &modules
+        )),
+    );
+
+    if !matches!(object.get("instruction"), Some(Value::Object(_))) {
+        let instruction = synthesize_lua_instruction_info(&*object, address, &modules);
+        object.insert("instruction".to_owned(), instruction);
+    }
+
+    Ok(body.to_string())
+}
+
+fn normalize_lua_function_boundaries_response(mut body: Value) -> Result<String, String> {
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| "lua find_function_boundaries returned non-object body".to_owned())?;
+    let modules = process::current_modules();
+    let query_address_value = object
+        .get("query_address")
+        .cloned()
+        .or_else(|| object.get("address").cloned());
+    let query_address = query_address_value
+        .as_ref()
+        .and_then(|value| util::parse_address(Some(value)).ok());
+    let function_start = response_address(object.get("function_start"));
+    let function_end = response_address(object.get("function_end"));
+    let found = object
+        .get("found")
+        .and_then(Value::as_bool)
+        .unwrap_or(function_start.is_some());
+
+    if !object.contains_key("query_address") {
+        if let Some(value) = query_address_value {
+            object.insert("query_address".to_owned(), value);
+        }
+    }
+    object.insert("found".to_owned(), json!(found));
+    object.insert(
+        "query_normalized_address".to_owned(),
+        json!(query_address
+            .and_then(|value| { addressing::normalize_address_from_modules(value, &modules) })),
+    );
+    object.insert(
+        "function_start_normalized".to_owned(),
+        json!(function_start
+            .and_then(|value| { addressing::normalize_address_from_modules(value, &modules) })),
+    );
+    object.insert(
+        "function_end_normalized".to_owned(),
+        json!(function_end
+            .and_then(|value| { addressing::normalize_address_from_modules(value, &modules) })),
+    );
+    if let (Some(start), Some(end)) = (function_start, function_end) {
+        object.insert(
+            "function_size".to_owned(),
+            json!(end.saturating_sub(start).saturating_add(1)),
+        );
+    }
+    object
+        .entry("arch".to_owned())
+        .or_insert_with(|| json!("x64"));
+
+    let needs_note = object.get("note").map_or(true, Value::is_null);
+    if needs_note {
+        let note = if !found {
+            Some("No standard function prologue found within search range")
+        } else if function_start.is_some() && function_end.is_none() {
+            Some("Function end not found within search range")
+        } else {
+            None
+        };
+        if let Some(note) = note {
+            object.insert("note".to_owned(), json!(note));
+        }
+    }
+
+    Ok(body.to_string())
+}
+
+fn normalize_lua_analyze_function_response(mut body: Value) -> Result<String, String> {
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| "lua analyze_function returned non-object body".to_owned())?;
+    let modules = process::current_modules();
+    let query_address_value = object
+        .get("query_address")
+        .cloned()
+        .or_else(|| object.get("address").cloned());
+    let query_address = query_address_value
+        .as_ref()
+        .and_then(|value| util::parse_address(Some(value)).ok());
+    let function_start = response_address(object.get("function_start"));
+    let function_end = response_address(object.get("function_end"));
+
+    if !object.contains_key("query_address") {
+        if let Some(value) = query_address_value {
+            object.insert("query_address".to_owned(), value);
+        }
+    }
+    object.insert(
+        "query_normalized_address".to_owned(),
+        json!(query_address
+            .and_then(|value| { addressing::normalize_address_from_modules(value, &modules) })),
+    );
+    object.insert(
+        "function_start_normalized".to_owned(),
+        json!(function_start
+            .and_then(|value| { addressing::normalize_address_from_modules(value, &modules) })),
+    );
+    object.insert(
+        "function_end_normalized".to_owned(),
+        json!(function_end
+            .and_then(|value| { addressing::normalize_address_from_modules(value, &modules) })),
+    );
+    if let (Some(start), Some(end)) = (function_start, function_end) {
+        object.insert(
+            "function_size".to_owned(),
+            json!(end.saturating_sub(start).saturating_add(1)),
+        );
+    }
+    object
+        .entry("arch".to_owned())
+        .or_insert_with(|| json!("x64"));
+
+    let call_count = if let Some(calls) = object.get_mut("calls").and_then(Value::as_array_mut) {
+        for call in calls.iter_mut() {
+            let Some(call_object) = call.as_object_mut() else {
+                continue;
+            };
+
+            let call_site = response_address(
+                call_object
+                    .get("call_site")
+                    .or_else(|| call_object.get("address")),
+            );
+            let target = response_address(call_object.get("target"));
+
+            if !call_object.contains_key("call_site") {
+                if let Some(value) = call_object.get("address").cloned() {
+                    call_object.insert("call_site".to_owned(), value);
+                }
+            }
+            call_object.insert(
+                "call_site_normalized".to_owned(),
+                json!(call_site.and_then(|value| {
+                    addressing::normalize_address_from_modules(value, &modules)
+                })),
+            );
+            call_object.insert(
+                "target_normalized".to_owned(),
+                json!(target.and_then(|value| {
+                    addressing::normalize_address_from_modules(value, &modules)
+                })),
+            );
+
+            let normalized_type = match call_object.get("type").and_then(Value::as_str) {
+                Some("relative") => Some("direct"),
+                Some("direct") => Some("direct"),
+                Some("indirect") => Some("indirect"),
+                Some(other) => Some(other),
+                None if target.is_some() => Some("direct"),
+                None => Some("indirect"),
+            };
+            if let Some(value) = normalized_type {
+                call_object.insert("type".to_owned(), json!(value));
+            }
+        }
+
+        calls.len()
+    } else {
+        0
+    };
+
+    object.insert("call_count".to_owned(), json!(call_count));
+    let needs_note = object.get("note").map_or(true, Value::is_null);
+    if needs_note && function_start.is_some() && function_end.is_none() {
+        object.insert(
+            "note".to_owned(),
+            json!("Function end not found within search range"),
+        );
+    }
+
+    Ok(body.to_string())
+}
+
+fn normalize_lua_dissect_structure_response(mut body: Value) -> Result<String, String> {
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| "lua dissect_structure returned non-object body".to_owned())?;
+    let modules = process::current_modules();
+    let base_address =
+        response_address(object.get("base_address").or_else(|| object.get("address")));
+
+    if let Some(base_address) = base_address {
+        object.insert(
+            "base_address".to_owned(),
+            json!(util::format_address(base_address)),
+        );
+    }
+    object.insert(
+        "base_address_normalized".to_owned(),
+        json!(base_address
+            .and_then(|value| { addressing::normalize_address_from_modules(value, &modules) })),
+    );
+
+    let element_count = if let Some(elements) =
+        object.get_mut("elements").and_then(Value::as_array_mut)
+    {
+        for element in elements.iter_mut() {
+            let Some(element_object) = element.as_object_mut() else {
+                continue;
+            };
+
+            let offset = element_object
+                .get("offset")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or_default();
+            element_object
+                .entry("hex_offset".to_owned())
+                .or_insert_with(|| json!(format!("+0x{:X}", offset)));
+            let needs_name = element_object
+                .get("name")
+                .and_then(Value::as_str)
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true);
+            if needs_name {
+                element_object.insert("name".to_owned(), json!(format!("field_{:04X}", offset)));
+            }
+
+            if let Some(vartype_code) = element_object.get("vartype").and_then(Value::as_i64) {
+                element_object.insert("vartype_code".to_owned(), json!(vartype_code));
+                element_object.insert(
+                    "vartype".to_owned(),
+                    json!(cheat_engine_vartype_name(vartype_code)),
+                );
+            }
+
+            element_object
+                .entry("confidence".to_owned())
+                .or_insert_with(|| json!("auto_guess"));
+        }
+
+        elements.len()
+    } else {
+        0
+    };
+
+    object.insert("element_count".to_owned(), json!(element_count));
+    object
+        .entry("resolver".to_owned())
+        .or_insert_with(|| json!("lua_auto_guess"));
+    object.entry("note".to_owned()).or_insert_with(|| {
+        json!("structure inference via CE Structure.autoGuess (legacy native heuristic removed)")
+    });
+
+    Ok(body.to_string())
+}
+
+fn normalize_lua_find_call_references_response(mut body: Value) -> Result<String, String> {
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| "lua find_call_references returned non-object body".to_owned())?;
+    let modules = process::current_modules();
+    let function_address = response_address(
+        object
+            .get("function_address")
+            .or_else(|| object.get("address")),
+    )
+    .ok_or_else(|| "lua find_call_references response missing function_address".to_owned())?;
+    let function_address_normalized =
+        addressing::normalize_address_from_modules(function_address, &modules);
+
+    object.insert(
+        "function_address".to_owned(),
+        json!(util::format_address(function_address)),
+    );
+    object.insert(
+        "function_address_normalized".to_owned(),
+        json!(function_address_normalized.clone()),
+    );
+
+    let caller_count =
+        if let Some(callers) = object.get_mut("callers").and_then(Value::as_array_mut) {
+            for caller in callers.iter_mut() {
+                let Some(caller_object) = caller.as_object_mut() else {
+                    continue;
+                };
+
+                let caller_address = response_address(
+                    caller_object
+                        .get("caller_address")
+                        .or_else(|| caller_object.get("address")),
+                );
+                if !caller_object.contains_key("caller_address") {
+                    if let Some(value) = caller_object.get("address").cloned() {
+                        caller_object.insert("caller_address".to_owned(), value);
+                    }
+                }
+                caller_object.insert(
+                    "caller_address_normalized".to_owned(),
+                    json!(caller_address.and_then(|value| {
+                        addressing::normalize_address_from_modules(value, &modules)
+                    })),
+                );
+                caller_object
+                    .entry("target".to_owned())
+                    .or_insert_with(|| json!(util::format_address(function_address)));
+                caller_object
+                    .entry("target_normalized".to_owned())
+                    .or_insert_with(|| json!(function_address_normalized.clone()));
+            }
+
+            callers.len()
+        } else {
+            0
+        };
+
+    object.insert("count".to_owned(), json!(caller_count));
+    object
+        .entry("arch".to_owned())
+        .or_insert_with(|| json!("x64"));
+
+    Ok(body.to_string())
+}
+
+fn synthesize_lua_instruction_info(
+    response: &serde_json::Map<String, Value>,
     address: usize,
-    max_search: usize,
-) -> Result<FunctionBoundary, String> {
-    let start = find_function_start(handle, address, max_search)
-        .ok_or_else(|| "No standard function prologue found within search range".to_owned())?;
-    let end = find_function_end(handle, start.0, max_search);
-    Ok(FunctionBoundary {
-        start: start.0,
-        end,
-        prologue_type: start.1,
-        note: end
-            .is_none()
-            .then(|| "Function end not found within search range".to_owned()),
+    modules: &[ModuleInfo],
+) -> Value {
+    let text = response
+        .get("instruction")
+        .and_then(Value::as_str)
+        .unwrap_or("???");
+    let size = response
+        .get("size")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let next_address = response_address(response.get("next_address"))
+        .or_else(|| size.map(|value| address.saturating_add(value)));
+    let near_branch_target = response_address(response.get("near_branch_target"));
+
+    json!({
+        "address": util::format_address(address),
+        "normalized_address": addressing::normalize_address_from_modules(address, modules),
+        "bytes": response.get("bytes").cloned().unwrap_or(Value::Null),
+        "text": text,
+        "mnemonic": response
+            .get("mnemonic")
+            .cloned()
+            .unwrap_or_else(|| json!(infer_instruction_mnemonic(text))),
+        "length": size,
+        "next_address": next_address.map(util::format_address),
+        "next_address_normalized": next_address
+            .and_then(|value| addressing::normalize_address_from_modules(value, modules)),
+        "op_count": response.get("op_count").cloned().unwrap_or(Value::Null),
+        "is_invalid": response
+            .get("is_invalid")
+            .cloned()
+            .unwrap_or_else(|| json!(instruction_text_invalid(text))),
+        "is_stack_instruction": response
+            .get("is_stack_instruction")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "flow_control": response.get("flow_control").cloned().unwrap_or(Value::Null),
+        "near_branch_target": near_branch_target.map(util::format_address),
+        "near_branch_target_normalized": near_branch_target
+            .and_then(|target| addressing::normalize_address_from_modules(target, modules)),
+        "is_ip_rel_memory_operand": response
+            .get("is_ip_rel_memory_operand")
+            .cloned()
+            .unwrap_or_else(|| json!(false)),
+        "ip_rel_memory_address": response
+            .get("ip_rel_memory_address")
+            .cloned()
+            .unwrap_or(Value::Null),
     })
 }
 
-fn find_function_start(
-    handle: *mut c_void,
-    address: usize,
-    max_search: usize,
-) -> Option<(usize, &'static str)> {
-    let search_start = address.saturating_sub(max_search);
-    let span = address.saturating_sub(search_start).saturating_add(4);
-    let bytes = runtime::read_process_memory(handle, search_start, span).ok()?;
-
-    for offset in (0..=address.saturating_sub(search_start)).rev() {
-        let idx = offset;
-        let b1 = *bytes.get(idx)?;
-        let b2 = *bytes.get(idx + 1).unwrap_or(&0);
-        let b3 = *bytes.get(idx + 2).unwrap_or(&0);
-        let b4 = *bytes.get(idx + 3).unwrap_or(&0);
-
-        if b1 == 0x55 && b2 == 0x48 && b3 == 0x89 && b4 == 0xE5 {
-            return Some((search_start + idx, "x64_standard"));
-        }
-        if b1 == 0x48 && b2 == 0x83 && b3 == 0xEC {
-            return Some((search_start + idx, "x64_leaf"));
-        }
-        if b1 == 0x40 && b2 == 0x53 && b3 == 0x48 && b4 == 0x83 {
-            return Some((search_start + idx, "x64_nonleaf"));
-        }
-    }
-
-    None
+fn infer_instruction_mnemonic(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .next()
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
 }
 
-fn find_function_end(handle: *mut c_void, start: usize, max_search: usize) -> Option<usize> {
-    let bytes = runtime::read_process_memory(handle, start, max_search).ok()?;
-    let decoded = decode_instruction_records(start, &bytes, MAX_DISASSEMBLY_COUNT);
-    for record in decoded {
-        if matches!(
-            record.instruction.mnemonic(),
-            Mnemonic::Ret | Mnemonic::Retf
-        ) {
-            return Some(
-                record
-                    .address
-                    .saturating_add(record.instruction.len() as usize)
-                    .saturating_sub(1),
-            );
-        }
-    }
-    None
+fn instruction_text_invalid(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.is_empty() || trimmed == "???"
 }
 
-fn collect_references(
-    handle: *mut c_void,
-    target: usize,
-    limit: usize,
-    calls_only: bool,
-    modules: &[runtime::ModuleInfo],
-) -> Result<Vec<Value>, String> {
-    let regions = runtime::enum_memory_regions(handle, None)?;
-    let mut results = Vec::new();
-
-    for region in regions {
-        if results.len() >= limit {
-            break;
-        }
-        if !runtime::is_region_usable(&region) || !runtime::is_region_executable(&region) {
-            continue;
-        }
-        let bytes_to_read = region.region_size.min(MAX_DISASSEMBLY_BYTES * 16);
-        let bytes = match runtime::read_process_memory(handle, region.base_address, bytes_to_read) {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-
-        for record in
-            decode_instruction_records(region.base_address, &bytes, MAX_DISASSEMBLY_COUNT * 16)
-        {
-            if results.len() >= limit {
-                break;
-            }
-            if instruction_references_target(&record, target, calls_only) {
-                results.push(json!({
-                    if calls_only { "caller_address" } else { "address" }: util::format_address(record.address),
-                    if calls_only { "caller_address_normalized" } else { "normalized_address" }: addressing::normalize_address_from_modules(record.address, modules),
-                    "instruction": record.text,
-                    "target": record.branch_target.map(util::format_address),
-                    "target_normalized": record.branch_target.and_then(|target| addressing::normalize_address_from_modules(target, modules)),
-                }));
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-fn instruction_references_target(record: &DecodedRecord, target: usize, calls_only: bool) -> bool {
-    let instruction = &record.instruction;
-    if calls_only {
-        return flow_control_is_call(instruction.flow_control())
-            && record.branch_target == Some(target);
-    }
-
-    if record.branch_target == Some(target) {
-        return true;
-    }
-    if instruction.is_ip_rel_memory_operand()
-        && instruction.ip_rel_memory_address() as usize == target
-    {
-        return true;
-    }
-
-    false
-}
-
-fn detect_ascii_string(bytes: &[u8]) -> Option<(usize, String)> {
-    let mut out = Vec::new();
-    for byte in bytes.iter().take(64).copied() {
-        if byte == 0 {
-            break;
-        }
-        if !(byte == b' ' || byte.is_ascii_graphic()) {
-            break;
-        }
-        out.push(byte);
-    }
-    if out.len() < 4 {
-        return None;
-    }
-    Some((
-        out.len().saturating_add(1),
-        String::from_utf8_lossy(&out).to_string(),
-    ))
-}
-
-fn detect_utf16_string(bytes: &[u8]) -> Option<(usize, String)> {
-    let mut words = Vec::new();
-    for chunk in bytes.chunks_exact(2).take(32) {
-        let word = u16::from_le_bytes([chunk[0], chunk[1]]);
-        if word == 0 {
-            break;
-        }
-        if word > 0x7E || word < 0x20 {
-            break;
-        }
-        words.push(word);
-    }
-    if words.len() < 4 {
-        return None;
-    }
-    Some((
-        words.len().saturating_mul(2).saturating_add(2),
-        String::from_utf16_lossy(&words),
-    ))
-}
-
-fn describe_pointer(
-    pointer: usize,
-    modules: &[runtime::ModuleInfo],
-    regions: &[runtime::MemoryRegionInfo],
-) -> Option<Value> {
-    if pointer == 0 {
-        return None;
-    }
-    if let Some(module) = modules.iter().find(|module| {
-        let start = module.base_address;
-        let end = start.saturating_add(module.size as usize);
-        start <= pointer && pointer < end
-    }) {
-        return Some(json!({
-            "kind": "module",
-            "module_name": module.name,
-            "module_base": util::format_address(module.base_address),
-            "offset": pointer.saturating_sub(module.base_address),
-        }));
-    }
-
-    let region = regions.iter().find(|region| {
-        let start = region.base_address;
-        let end = start.saturating_add(region.region_size);
-        start <= pointer && pointer < end && runtime::is_region_readable(region)
-    })?;
-
-    Some(json!({
-        "kind": "memory",
-        "base": util::format_address(region.base_address),
-        "offset": pointer.saturating_sub(region.base_address),
-        "protection": runtime::protection_to_string(region.protect),
-    }))
-}
-
-fn looks_reasonable_float(value: f32) -> bool {
-    value.is_finite() && value.abs() >= 0.0001 && value.abs() <= 1.0e9
-}
-
-fn align_up(value: usize, align: usize) -> usize {
-    if align == 0 {
-        return value;
-    }
-    let rem = value % align;
-    if rem == 0 {
-        value
-    } else {
-        value + (align - rem)
+fn cheat_engine_vartype_name(vartype: i64) -> &'static str {
+    match vartype {
+        0 => "byte",
+        1 => "word",
+        2 => "dword",
+        3 => "float",
+        4 => "double",
+        5 => "bit",
+        6 => "qword",
+        7 => "string",
+        8 => "byte_array",
+        9 => "binary",
+        10 => "all",
+        11 => "auto_assembler",
+        12 => "pointer",
+        13 => "custom",
+        14 => "grouped",
+        15 => "unicode_string",
+        16 => "code_page_string",
+        _ => "unknown",
     }
 }
 
-fn format_instruction_bytes(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{:02X}", byte))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn flow_control_is_call(flow: FlowControl) -> bool {
-    matches!(flow, FlowControl::Call | FlowControl::IndirectCall)
-}
-
-fn flow_control_has_branch_target(flow: FlowControl) -> bool {
-    matches!(
-        flow,
-        FlowControl::Call
-            | FlowControl::ConditionalBranch
-            | FlowControl::UnconditionalBranch
-            | FlowControl::XbeginXabortXend
-    )
-}
-
-fn format_mnemonic(mnemonic: Mnemonic) -> String {
-    format!("{:?}", mnemonic).to_ascii_lowercase()
-}
-
-fn parse_usize(value: Option<&Value>, default: usize, max: usize) -> usize {
-    value
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(default)
-        .min(max)
-}
-
-fn opened_process_handle() -> Option<*mut c_void> {
-    runtime::app_state().and_then(|app| app.opened_process_handle())
-}
-
-fn current_modules() -> Vec<runtime::ModuleInfo> {
-    let Some(app) = runtime::app_state() else {
-        return Vec::new();
-    };
-
-    let process_id = app.opened_process_id().unwrap_or(0);
-    if process_id == 0 {
-        return Vec::new();
+fn call_lua_tool_json(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
+    let response = lua_backend::call_lua_tool(method, params_json);
+    if !response.success {
+        return Err(response);
     }
 
-    runtime::enum_modules(process_id).unwrap_or_default()
+    serde_json::from_str::<Value>(&response.body_json)
+        .map_err(|error| error_response(format!("invalid {} lua response json: {}", method, error)))
 }
 
-fn runtime_unavailable(message: &str) -> ToolResponse {
-    ToolResponse {
-        success: false,
-        body_json: message.to_owned(),
-    }
+fn response_address(value: Option<&Value>) -> Option<usize> {
+    value.and_then(|value| util::parse_address(Some(value)).ok())
 }
 
 fn error_response(message: String) -> ToolResponse {

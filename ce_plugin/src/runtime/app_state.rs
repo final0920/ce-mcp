@@ -10,7 +10,6 @@ use crate::tools::{self, ToolResponse};
 
 use super::config::RuntimeConfig;
 use super::dispatcher::MainThreadDispatcher;
-use super::scan_state::ScanSession;
 
 pub struct AppState {
     plugin_id: i32,
@@ -19,7 +18,6 @@ pub struct AppState {
     initialized: AtomicBool,
     dispatcher: MainThreadDispatcher,
     http_server: Mutex<StreamableHttpServer>,
-    scan_session: Mutex<Option<ScanSession>>,
 }
 
 impl AppState {
@@ -37,7 +35,6 @@ impl AppState {
             initialized: AtomicBool::new(false),
             dispatcher,
             http_server: Mutex::new(http_server),
-            scan_session: Mutex::new(None),
         }
     }
 
@@ -116,17 +113,6 @@ impl AppState {
 
     pub fn stop_dispatcher(&self) -> Result<(), String> {
         self.dispatcher.stop()
-    }
-
-    pub fn with_scan_session<T, F>(&self, callback: F) -> Result<T, String>
-    where
-        F: FnOnce(&mut Option<ScanSession>) -> Result<T, String>,
-    {
-        let mut session = self
-            .scan_session
-            .lock()
-            .map_err(|_| "scan session lock poisoned".to_owned())?;
-        callback(&mut session)
     }
 
     pub fn dispatch_tool(&self, method: &str, params_json: &str) -> ToolResponse {

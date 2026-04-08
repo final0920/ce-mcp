@@ -1,10 +1,12 @@
-# Cheat Engine MCP Plugin
+# ce-mcp / ce_plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#requirements)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org)
 
-Native Cheat Engine plugin that exposes a local MCP-compatible HTTP endpoint for AI agents and operator-driven reverse engineering workflows.
+Single-DLL Cheat Engine plugin runtime for `ce-mcp`.
+
+The official delivery model remains **one `ce_plugin.dll`**. Phase 1 moves process / memory / analysis execution toward an **embedded Cheat Engine Lua backend** that is bootstrapped by the plugin itself. Users do **not** manually load a separate Lua bridge or manage a second runtime component.
 
 **Language**: [English](./README.md) | [简体中文](./README.zh-CN.md)
 
@@ -14,11 +16,22 @@ Native Cheat Engine plugin that exposes a local MCP-compatible HTTP endpoint for
 - Original project license: MIT.
 - Original copyright notice: `Copyright (c) 2025 miscusi-peek`.
 
+## Delivery Model / Phase 1 Direction
+
+- Product identity: `ce-mcp / ce_plugin`
+- External artifact: one `ce_plugin.dll`
+- Rust remains responsible for plugin lifecycle, config, dispatcher, HTTP, MCP, and response shaping
+- Embedded CE Lua assets are an internal backend detail for CE-first execution paths
+- External versioning follows `ce_plugin/Cargo.toml` and this README, not a separate `CE_MCP_Bridge v11.x` line
+- Legacy `docs/ce_mcp_bridge.lua` is reference material for migration, not a standalone shipped component
+
+Migration rationale and scope notes: [`../docs/phase1-migration-notes.md`](../docs/phase1-migration-notes.md)
+
 ## Overview
 
 This project turns Cheat Engine into a local MCP tool host.
 
-Instead of asking an AI model to reason blindly about a target process, the model can call structured tools through MCP and collaborate with Cheat Engine as an actual reversing backend:
+Instead of asking an AI model to reason blindly about a target process, the model can call structured tools through MCP and collaborate with Cheat Engine as the actual reversing backend:
 
 - inspect modules, threads, and memory regions
 - read and write process memory
@@ -31,6 +44,8 @@ The result is a practical workflow where:
 
 - Cheat Engine remains the live debugger and memory-analysis engine
 - the MCP client provides transport and tool invocation
+- Rust provides the plugin envelope and transport surface
+- CE-native execution paths are increasingly routed through the embedded Lua backend where that is more reliable than raw WinAPI access
 - the model handles hypothesis generation, planning, correlation, and iterative reverse-engineering tasks
 
 ## Reverse Engineering Workflow
@@ -68,6 +83,7 @@ ce_plugin/target/release/ce_plugin.dll
 2. Load `ce_plugin.dll` as a plugin.
 3. Attach a target process.
 4. Confirm the plugin console shows runtime status.
+5. Do **not** manually load an extra Lua bridge; Phase 1 backend bootstrap is owned by the plugin.
 
 ### 3. Connect MCP Client
 
@@ -78,10 +94,11 @@ The exact client config depends on whether the MCP client supports HTTP or Strea
 
 ## Runtime Notes
 
+- The official backend direction for process / memory / analysis tooling is CE-first execution through the embedded Lua backend. Native WinAPI / process-handle paths are no longer the architectural baseline for DMA-oriented scenarios.
 - `dispatcher_mode = window-message-hook` means CE main-window dispatch hook is active.
-- `script_runtime_ready = true` means script-sensitive tools are available.
-- If the hook cannot be installed, the plugin falls back to `serialized-worker`.
-- In fallback mode, native Rust tools still work, but script, breakpoint, and DBVM tools are limited.
+- `script_runtime_ready = true` means script-sensitive tools and backend-bootstrap-dependent CE paths are available.
+- If the hook cannot be installed, the plugin may fall back to `serialized-worker`.
+- Fallback mode is a degraded compatibility path, not the preferred long-term backend for migrated CE-first tools.
 
 ## Tool Surface
 
@@ -209,6 +226,8 @@ Supported config filenames:
 - `ce_plugin.config`
 - `ce_plugin.env`
 
+No separate Lua bootstrap file needs to be configured or loaded manually.
+
 Example:
 ```text
 CE_PLUGIN_BIND_ADDR=0.0.0.0:18765
@@ -220,12 +239,18 @@ CE_PLUGIN_CONSOLE_TITLE=流云MCP插件
 ## Project Layout
 
 ```text
-ce_plugin/
-README.md
-README.zh-CN.md
-LICENSE
+ce-mcp/
+├─ ce_plugin/
+│  └─ Cargo.toml
+├─ README.md
+├─ README.zh-CN.md
+└─ LICENSE
 ```
+
+Additional migration note: `../docs/phase1-migration-notes.md`
 
 ## License
 
 MIT. See [LICENSE](./LICENSE).
+
+Embedded Lua assets, when migrated into the plugin, follow the same repository-level `ce-mcp / ce_plugin` product identity and fork notice. They are implementation details, not a separately versioned end-user product.

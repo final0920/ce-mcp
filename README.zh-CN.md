@@ -1,10 +1,12 @@
-# Cheat Engine MCP 插件版
+# ce-mcp / ce_plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#环境要求)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org)
 
-原生 Cheat Engine 插件运行时，通过本地 HTTP MCP 端点把 Cheat Engine 变成一个可供大模型调用的逆向分析后端。
+`ce-mcp` 的单 DLL Cheat Engine 插件运行时。
+
+正式交付形态保持为 **一个 `ce_plugin.dll`**。Phase 1 会把进程 / 内存 / 分析等执行路径逐步切到 **插件内部自动 bootstrap 的 CE Lua 后端**。用户**不需要**手动加载额外 Lua bridge，也不需要维护第二套运行组件。
 
 **语言**: [English](./README.md) | [简体中文](./README.zh-CN.md)
 
@@ -14,6 +16,17 @@
 - 原项目许可证：MIT。
 - 原始版权声明：`Copyright (c) 2025 miscusi-peek`。
 
+## 交付形态 / Phase 1 方向
+
+- 产品身份：`ce-mcp / ce_plugin`
+- 对外交付物：一个 `ce_plugin.dll`
+- Rust 继续负责插件生命周期、配置、调度器、HTTP、MCP 与结果包装
+- 内嵌 CE Lua 资产属于内部后端实现细节，服务于 CE-first 执行路径
+- 对外版本口径以 `ce_plugin/Cargo.toml` 与本 README 为准，不再额外暴露 `CE_MCP_Bridge v11.x` 一类独立产品版本线
+- `docs/ce_mcp_bridge.lua` 目前只作为迁移参考，不是面向最终用户交付的独立组件
+
+迁移背景与范围说明见：[`../docs/phase1-migration-notes.md`](../docs/phase1-migration-notes.md)
+
 ## 项目定位
 
 这个项目的目标，不是单纯把 CE 包成一个 HTTP 服务，而是让大模型能够通过 MCP 与 Cheat Engine 协作逆向。
@@ -22,6 +35,8 @@
 
 - Cheat Engine 负责真实的运行时调试、内存访问、断点、脚本执行与动态观察
 - MCP 客户端负责把工具暴露给 AI Agent
+- Rust 负责插件壳层与传输面
+- 在比直接 WinAPI 更可靠的场景下，CE 原生能力会逐步通过内嵌 Lua 后端承接
 - 大模型负责提出假设、规划步骤、关联证据、解释现象、推动逆向分析闭环
 
 也就是说，模型不再只是“纸上谈兵”，而是可以真正调用 CE 去做：
@@ -68,6 +83,7 @@ ce_plugin/target/release/ce_plugin.dll
 2. 以插件方式加载 `ce_plugin.dll`。
 3. 附加目标进程。
 4. 查看插件控制台是否打印运行状态。
+5. **不要**再手动加载额外 Lua bridge；Phase 1 后端 bootstrap 由插件自身负责。
 
 ### 3. 连接 MCP 客户端
 
@@ -78,10 +94,11 @@ ce_plugin/target/release/ce_plugin.dll
 
 ## 运行说明
 
+- 进程 / 内存 / 分析工具的正式后端方向是经由内嵌 Lua 后端走 CE-first 执行路径。原生 WinAPI / process handle 主路径不再是 DMA 类场景的架构基线。
 - `dispatcher_mode = window-message-hook` 表示已成功挂入 CE 主窗口消息调度链。
-- `script_runtime_ready = true` 表示脚本敏感工具已经可用。
-- 若安装 hook 失败，插件会自动回退为 `serialized-worker`。
-- 回退模式下，纯 Rust 原生工具仍可用，但脚本、断点、DBVM 工具会受限。
+- `script_runtime_ready = true` 表示脚本敏感工具以及依赖后端 bootstrap 的 CE 路径已经可用。
+- 若安装 hook 失败，插件可能回退为 `serialized-worker`。
+- 回退模式属于降级兼容路径，不应再视为已迁移 CE-first 工具的长期首选后端。
 
 ## 功能列表
 
@@ -157,15 +174,6 @@ ce_plugin/target/release/ce_plugin.dll
 - `poll_dbvm_watch`: 轮询 DBVM watch 中间结果而不停止会话。
 - `stop_dbvm_watch`: 停止 DBVM watch 并返回最终结果。
 
-## 输出约定
-
-近期改造后，运行时结果开始逐步统一：
-
-- 地址类结果会尽量返回 `normalized_address`
-- 指针/链路类结果会尽量补充标准化后的目标地址
-- 断点与 DBVM watch 流程会返回结构化 `evidence`
-- batch 接口按单项容错设计，单条失败不会中断整批
-
 ### 脚本
 
 用于快速实验、验证思路、自动化 CE 侧逻辑和补丁过程。
@@ -174,6 +182,15 @@ ce_plugin/target/release/ce_plugin.dll
 - `evaluate_lua_file`: 执行本地 Lua 文件。
 - `auto_assemble`: 执行 Auto Assembler 脚本文本。
 - `auto_assemble_file`: 执行本地 Auto Assembler 脚本文件。
+
+## 输出约定
+
+近期改造后，运行时结果开始逐步统一：
+
+- 地址类结果会尽量返回 `normalized_address`
+- 指针/链路类结果会尽量补充标准化后的目标地址
+- 断点与 DBVM watch 流程会返回结构化 `evidence`
+- batch 接口按单项容错设计，单条失败不会中断整批
 
 ### 兼容别名
 
@@ -209,6 +226,8 @@ ce_plugin/target/release/ce_plugin.dll
 - `ce_plugin.config`
 - `ce_plugin.env`
 
+不需要额外配置或手工加载任何 Lua bootstrap 文件。
+
 示例：
 ```text
 CE_PLUGIN_BIND_ADDR=0.0.0.0:18765
@@ -220,12 +239,18 @@ CE_PLUGIN_CONSOLE_TITLE=流云MCP插件
 ## 项目结构
 
 ```text
-ce_plugin/
-README.md
-README.zh-CN.md
-LICENSE
+ce-mcp/
+├─ ce_plugin/
+│  └─ Cargo.toml
+├─ README.md
+├─ README.zh-CN.md
+└─ LICENSE
 ```
+
+补充迁移说明：`../docs/phase1-migration-notes.md`
 
 ## 许可证
 
 MIT，详见 [LICENSE](./LICENSE)。
+
+后续内嵌进插件的 Lua 资产也遵循同一套仓库级 `ce-mcp / ce_plugin` 产品身份与 fork notice，不再以“独立脚本产品”方式对外描述。

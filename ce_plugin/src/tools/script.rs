@@ -27,6 +27,7 @@ const LUA_TFUNCTION: c_int = 6;
 const LUA_TUSERDATA: c_int = 7;
 const LUA_TTHREAD: c_int = 8;
 const STRUCTURED_DEPTH_LIMIT: usize = 4;
+const MAX_SAFE_JSON_INTEGER: i64 = 9_007_199_254_740_991;
 
 type Hmodule = *mut c_void;
 type LuaState = c_void;
@@ -111,6 +112,14 @@ pub fn supported_methods() -> &'static [&'static str] {
 
 pub(crate) fn execute_lua_snippet(code: &str, structured: bool) -> Result<Value, String> {
     with_lua_runtime(|state, lua| execute_lua_code(state, lua, code, structured))
+}
+
+pub(crate) fn call_lua_global(
+    function_name: &str,
+    args: &[&str],
+    structured: bool,
+) -> Result<Value, String> {
+    with_lua_runtime(|state, lua| execute_lua_global(state, lua, function_name, args, structured))
 }
 
 fn evaluate_lua(params_json: &str) -> ToolResponse {
@@ -255,6 +264,51 @@ fn execute_lua_code(
         return Err(format!("Runtime error: {}", lua_error_string(state, lua)));
     }
 
+    collect_lua_results(state, lua, structured)
+}
+
+fn execute_lua_global(
+    state: *mut LuaState,
+    lua: &LuaApi,
+    function_name: &str,
+    args: &[&str],
+    structured: bool,
+) -> Result<Value, String> {
+    let _guard = StackGuard::new(state, lua);
+    let function_name = CString::new(function_name)
+        .map_err(|_| "lua function name contains interior null byte".to_owned())?;
+
+    unsafe {
+        (lua.lua_getglobal)(state, function_name.as_ptr());
+    }
+    if unsafe { (lua.lua_type)(state, -1) } != LUA_TFUNCTION {
+        return Err(format!(
+            "CE Lua global {} is unavailable",
+            function_name.to_string_lossy()
+        ));
+    }
+
+    for arg in args {
+        let arg = CString::new(*arg)
+            .map_err(|_| "lua argument contains interior null byte".to_owned())?;
+        unsafe {
+            (lua.lua_pushlstring)(state, arg.as_ptr(), arg.as_bytes().len());
+        }
+    }
+
+    let status = unsafe { (lua.lua_pcallk)(state, args.len() as c_int, LUA_MULTRET, 0, 0, None) };
+    if status != LUA_OK {
+        return Err(format!("Runtime error: {}", lua_error_string(state, lua)));
+    }
+
+    collect_lua_results(state, lua, structured)
+}
+
+fn collect_lua_results(
+    state: *mut LuaState,
+    lua: &LuaApi,
+    structured: bool,
+) -> Result<Value, String> {
     let top = unsafe { (lua.lua_gettop)(state) };
     let first_index = 1;
     let first_result = if top >= first_index {
@@ -518,7 +572,7 @@ fn lua_number_to_json(state: *mut LuaState, lua: &LuaApi, index: c_int) -> Resul
     let mut integer_flag = 0;
     let integer = unsafe { (lua.lua_tointegerx)(state, index, &mut integer_flag) };
     if integer_flag != 0 {
-        return Ok(Value::Number(Number::from(integer as i64)));
+        return Ok(json_integer_value(integer));
     }
 
     let mut number_flag = 0;
@@ -533,6 +587,19 @@ fn lua_number_to_json(state: *mut LuaState, lua: &LuaApi, index: c_int) -> Resul
         Some(value) => Ok(Value::Number(value)),
         None => Ok(Value::String(number.to_string())),
     }
+}
+
+fn json_integer_value(integer: LuaInteger) -> Value {
+    let integer = integer as i64;
+    if fits_json_safe_integer(integer) {
+        Value::Number(Number::from(integer))
+    } else {
+        Value::String(integer.to_string())
+    }
+}
+
+fn fits_json_safe_integer(integer: i64) -> bool {
+    integer.unsigned_abs() <= MAX_SAFE_JSON_INTEGER as u64
 }
 
 fn lua_table_to_json(
@@ -697,5 +764,32 @@ impl Drop for StackScope<'_> {
         unsafe {
             (self.lua.lua_settop)(self.state, self.top);
         }
+    }
+}
+
+#[cfg(test)]
+mod json_integer_tests {
+    use serde_json::Value;
+
+    use super::{fits_json_safe_integer, json_integer_value, MAX_SAFE_JSON_INTEGER};
+
+    #[test]
+    fn safe_json_integer_threshold_matches_javascript_limit() {
+        assert!(fits_json_safe_integer(MAX_SAFE_JSON_INTEGER));
+        assert!(fits_json_safe_integer(-MAX_SAFE_JSON_INTEGER));
+        assert!(!fits_json_safe_integer(MAX_SAFE_JSON_INTEGER + 1));
+        assert!(!fits_json_safe_integer(-(MAX_SAFE_JSON_INTEGER + 1)));
+    }
+
+    #[test]
+    fn large_lua_integers_become_strings() {
+        assert_eq!(
+            json_integer_value((MAX_SAFE_JSON_INTEGER + 1) as isize),
+            Value::String((MAX_SAFE_JSON_INTEGER + 1).to_string())
+        );
+        assert_eq!(
+            json_integer_value((-(MAX_SAFE_JSON_INTEGER + 1)) as isize),
+            Value::String((-(MAX_SAFE_JSON_INTEGER + 1)).to_string())
+        );
     }
 }
