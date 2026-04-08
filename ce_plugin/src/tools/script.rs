@@ -7,7 +7,7 @@ use serde_json::{json, Map, Number, Value};
 use crate::runtime;
 use crate::runtime::console;
 
-use super::{util, ToolResponse};
+use super::{lua_backend, util, ToolResponse};
 
 const METHODS: &[&str] = &[
     "evaluate_lua",
@@ -124,32 +124,7 @@ pub(crate) fn call_lua_global(
 }
 
 fn evaluate_lua(params_json: &str) -> ToolResponse {
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-
-    let code = match params.get("code").and_then(Value::as_str) {
-        Some(code) if !code.trim().is_empty() => code,
-        _ => return error_response("missing code".to_owned()),
-    };
-    let structured = params
-        .get("structured")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || params
-            .get("structured_result")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-
-    let result = execute_lua_snippet(code, structured);
-    match result {
-        Ok(body) => ToolResponse {
-            success: true,
-            body_json: body.to_string(),
-        },
-        Err(error) => error_response(error),
-    }
+    lua_backend::call_lua_tool("evaluate_lua", params_json)
 }
 
 fn evaluate_lua_file(params_json: &str) -> ToolResponse {
@@ -174,32 +149,11 @@ fn evaluate_lua_file(params_json: &str) -> ToolResponse {
         "structured_result": params.get("structured_result").and_then(Value::as_bool).unwrap_or(false)
     });
 
-    evaluate_lua(proxy.to_string().as_str())
+    lua_backend::call_lua_tool("evaluate_lua", proxy.to_string().as_str())
 }
 
 fn auto_assemble(params_json: &str) -> ToolResponse {
-    let params = match util::parse_params(params_json) {
-        Ok(value) => value,
-        Err(error) => return error_response(error),
-    };
-
-    let script = match params
-        .get("script")
-        .or_else(|| params.get("code"))
-        .and_then(Value::as_str)
-    {
-        Some(script) if !script.trim().is_empty() => script,
-        _ => return error_response("missing script".to_owned()),
-    };
-
-    let result = with_lua_runtime(|state, lua| execute_auto_assemble(state, lua, script));
-    match result {
-        Ok(body) => ToolResponse {
-            success: true,
-            body_json: body.to_string(),
-        },
-        Err(error) => error_response(error),
-    }
+    lua_backend::call_lua_tool("auto_assemble", params_json)
 }
 
 fn auto_assemble_file(params_json: &str) -> ToolResponse {
@@ -221,7 +175,7 @@ fn auto_assemble_file(params_json: &str) -> ToolResponse {
     };
 
     let proxy = json!({ "script": script });
-    auto_assemble(proxy.to_string().as_str())
+    lua_backend::call_lua_tool("auto_assemble", proxy.to_string().as_str())
 }
 
 fn with_lua_runtime<T, F>(callback: F) -> Result<T, String>
