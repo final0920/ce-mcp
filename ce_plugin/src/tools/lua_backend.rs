@@ -12,6 +12,11 @@ pub(crate) const INTERNAL_DISPATCH_METHOD: &str = "__ce_mcp_call_lua_backend";
 
 const LUA_BACKEND_SENTINEL: &str = "__ce_mcp_rust_backend";
 const LUA_BACKEND_DISPATCH: &str = "__ce_mcp_rust_dispatch_json";
+const LUA_BACKEND_RUNTIME_STATUS: &str = "__ce_mcp_embedded_runtime_status_json";
+const LUA_BACKEND_RUNTIME_START: &str = "__ce_mcp_embedded_runtime_start_json";
+const LUA_BACKEND_TRANSPORT_SUBMIT: &str = "__ce_mcp_embedded_transport_submit_json";
+const LUA_BACKEND_TRANSPORT_STEP: &str = "__ce_mcp_embedded_transport_step_json";
+const LUA_BACKEND_TRANSPORT_RECV: &str = "__ce_mcp_embedded_transport_recv_json";
 const LUA_BACKEND_READY: &str = "ce-mcp-rust-lua-backend-ready";
 
 static LUA_BACKEND_STATE: OnceLock<Mutex<BackendState>> = OnceLock::new();
@@ -20,6 +25,7 @@ static LUA_BOOTSTRAP_CHUNK: OnceLock<String> = OnceLock::new();
 #[derive(Debug, Default)]
 struct BackendState {
     bootstrapped: bool,
+    next_request_id: u64,
 }
 
 pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
@@ -177,35 +183,81 @@ fn ensure_backend_bootstrapped() -> Result<(), String> {
 }
 
 fn dispatch_to_lua(method: &str, params_json: &str) -> Result<ToolResponse, String> {
-    console::info(format!(
-        "[lua_backend] step=call_global_begin function={} method={} params_len={}",
-        LUA_BACKEND_DISPATCH,
-        method,
-        params_json.len()
-    ));
-    let response = lua_host::call_global(LUA_BACKEND_DISPATCH, &[method, params_json], false)?;
-    let encoded = response
-        .get("result")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "lua backend dispatch returned non-string result".to_owned())?;
+    let request_id = next_request_id()?;
+    let submit_payload = json!({
+        "id": request_id,
+        "method": method,
+        "params_json": params_json,
+    })
+    .to_string();
 
     console::info(format!(
-        "[lua_backend] step=call_global_end function={} method={} result_len={}",
-        LUA_BACKEND_DISPATCH,
-        method,
-        encoded.len()
+        "[lua_backend] step=transport_submit_begin function={} method={} request_id={}",
+        LUA_BACKEND_TRANSPORT_SUBMIT, method, request_id
     ));
+    let submit = call_json_global(LUA_BACKEND_TRANSPORT_SUBMIT, &[submit_payload.as_str()])?;
+    ensure_success(LUA_BACKEND_TRANSPORT_SUBMIT, &submit)?;
     console::info(format!(
-        "[lua_backend] step=parse_result_begin method={}",
-        method
+        "[lua_backend] step=transport_submit_end method={} request_id={}",
+        method, request_id
+    ));
+
+    console::info(format!(
+        "[lua_backend] step=transport_step_begin function={} method={} request_id={}",
+        LUA_BACKEND_TRANSPORT_STEP, method, request_id
+    ));
+    let step = call_json_global(LUA_BACKEND_TRANSPORT_STEP, &["1"])?;
+    ensure_success(LUA_BACKEND_TRANSPORT_STEP, &step)?;
+    console::info(format!(
+        "[lua_backend] step=transport_step_end method={} request_id={} processed={}",
+        method,
+        request_id,
+        step.get("processed").and_then(Value::as_u64).unwrap_or(0)
+    ));
+
+    console::info(format!(
+        "[lua_backend] step=transport_recv_begin function={} method={} request_id={}",
+        LUA_BACKEND_TRANSPORT_RECV, method, request_id
+    ));
+    let recv = call_json_global(LUA_BACKEND_TRANSPORT_RECV, &[])?;
+    ensure_success(LUA_BACKEND_TRANSPORT_RECV, &recv)?;
+    console::info(format!(
+        "[lua_backend] step=transport_recv_end method={} request_id={}",
+        method, request_id
+    ));
+
+    let response = recv
+        .get("response")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "lua backend transport recv returned no response envelope".to_owned())?;
+
+    let response_id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "lua backend transport response missing id".to_owned())?;
+    if response_id != request_id {
+        return Err(format!(
+            "lua backend transport response id mismatch: expected {}, got {}",
+            request_id, response_id
+        ));
+    }
+
+    let encoded = response
+        .get("body_json")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "lua backend transport response missing body_json".to_owned())?;
+
+    console::info(format!(
+        "[lua_backend] step=parse_result_begin method={} request_id={}",
+        method, request_id
     ));
     let body: Value = serde_json::from_str(encoded)
         .map_err(|error| format!("lua backend returned invalid json: {}", error))?;
 
     let success = body.get("success").and_then(Value::as_bool).unwrap_or(true);
     console::info(format!(
-        "[lua_backend] step=parse_result_end method={} success={}",
-        method, success
+        "[lua_backend] step=parse_result_end method={} request_id={} success={}",
+        method, request_id, success
     ));
 
     if success {
@@ -254,6 +306,15 @@ fn backend_state() -> &'static Mutex<BackendState> {
     LUA_BACKEND_STATE.get_or_init(|| Mutex::new(BackendState::default()))
 }
 
+fn next_request_id() -> Result<String, String> {
+    let state = backend_state();
+    let mut guard = state
+        .lock()
+        .map_err(|_| "lua backend state lock poisoned".to_owned())?;
+    guard.next_request_id = guard.next_request_id.saturating_add(1);
+    Ok(format!("rust-req-{}", guard.next_request_id))
+}
+
 fn bootstrap_chunk() -> &'static str {
     LUA_BOOTSTRAP_CHUNK
         .get_or_init(build_bootstrap_chunk)
@@ -264,6 +325,11 @@ fn build_bootstrap_chunk() -> String {
     let embedded_source = lua::bootstrap_source();
     let sentinel = json_string_literal(LUA_BACKEND_SENTINEL);
     let dispatch = json_string_literal(LUA_BACKEND_DISPATCH);
+    let runtime_status = json_string_literal(LUA_BACKEND_RUNTIME_STATUS);
+    let runtime_start = json_string_literal(LUA_BACKEND_RUNTIME_START);
+    let transport_submit = json_string_literal(LUA_BACKEND_TRANSPORT_SUBMIT);
+    let transport_step = json_string_literal(LUA_BACKEND_TRANSPORT_STEP);
+    let transport_recv = json_string_literal(LUA_BACKEND_TRANSPORT_RECV);
     let version = json_string_literal(env!("CARGO_PKG_VERSION"));
     let source = json_string_literal(lua::SOURCE_LABEL);
     let ready = json_string_literal(LUA_BACKEND_READY);
@@ -271,7 +337,13 @@ fn build_bootstrap_chunk() -> String {
     format!(
         r#"
 local existing_backend = _G[{sentinel}]
-if type(existing_backend) == "table" and type(_G[{dispatch}]) == "function" then
+if type(existing_backend) == "table"
+   and type(_G[{dispatch}]) == "function"
+   and type(_G[{runtime_status}]) == "function"
+   and type(_G[{runtime_start}]) == "function"
+   and type(_G[{transport_submit}]) == "function"
+   and type(_G[{transport_step}]) == "function"
+   and type(_G[{transport_recv}]) == "function" then
     return "already-bootstrapped"
 end
 
@@ -287,6 +359,10 @@ _G[{sentinel}] = {{
     cleanup = cleanupZombieState,
 }}
 _G[{dispatch}] = dispatch
+
+if type(_G[{runtime_start}]) == "function" then
+    pcall(_G[{runtime_start}], '{{"reason":"rust-bootstrap"}}')
+end
 
 return {ready}
 "#
@@ -304,14 +380,50 @@ fn error_response(message: String) -> ToolResponse {
     }
 }
 
+fn call_json_global(function_name: &str, args: &[&str]) -> Result<Value, String> {
+    console::info(format!(
+        "[lua_backend] step=call_global_begin function={} argc={}",
+        function_name,
+        args.len()
+    ));
+    let response = lua_host::call_global(function_name, args, false)?;
+    let encoded = response
+        .get("result")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{} returned non-string result", function_name))?;
+    console::info(format!(
+        "[lua_backend] step=call_global_end function={} result_len={}",
+        function_name,
+        encoded.len()
+    ));
+    serde_json::from_str::<Value>(encoded)
+        .map_err(|error| format!("{} returned invalid json: {}", function_name, error))
+}
+
+fn ensure_success(function_name: &str, body: &Value) -> Result<(), String> {
+    if body.get("success").and_then(Value::as_bool).unwrap_or(true) {
+        Ok(())
+    } else {
+        Err(body
+            .get("error")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("{} returned error body", function_name)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_bootstrap_chunk, INTERNAL_DISPATCH_METHOD, LUA_BACKEND_DISPATCH};
+    use super::{
+        build_bootstrap_chunk, INTERNAL_DISPATCH_METHOD, LUA_BACKEND_DISPATCH,
+        LUA_BACKEND_TRANSPORT_SUBMIT,
+    };
 
     #[test]
     fn bootstrap_chunk_exports_dispatch_function() {
         let chunk = build_bootstrap_chunk();
         assert!(chunk.contains(LUA_BACKEND_DISPATCH));
+        assert!(chunk.contains(LUA_BACKEND_TRANSPORT_SUBMIT));
         assert!(chunk.contains("embedded:ce_plugin/src/lua"));
         assert!(chunk.contains("cleanupZombieState"));
         assert!(!chunk.contains("StartMCPBridge()"));
