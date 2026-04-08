@@ -1,3 +1,4 @@
+use super::auth::{authorize_request, AuthError};
 use super::mcp;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -17,16 +18,25 @@ const MAX_MCP_BODY_BYTES: usize = 256 * 1024;
 pub struct StreamableHttpServer {
     bind_addr: String,
     allow_remote: bool,
+    auth_enabled: bool,
+    auth_token: Option<String>,
     running: bool,
     stop_flag: Option<Arc<AtomicBool>>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl StreamableHttpServer {
-    pub fn new(bind_addr: String, allow_remote: bool) -> Self {
+    pub fn new(
+        bind_addr: String,
+        allow_remote: bool,
+        auth_enabled: bool,
+        auth_token: Option<String>,
+    ) -> Self {
         Self {
             bind_addr,
             allow_remote,
+            auth_enabled,
+            auth_token,
             running: false,
             stop_flag: None,
             worker: None,
@@ -46,6 +56,8 @@ impl StreamableHttpServer {
 
         let bind_addr = self.bind_addr.clone();
         let allow_remote = self.allow_remote;
+        let auth_enabled = self.auth_enabled;
+        let auth_token = self.auth_token.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop_flag);
 
@@ -63,6 +75,8 @@ impl StreamableHttpServer {
                                 plugin_id,
                                 &bind_addr,
                                 allow_remote,
+                                auth_enabled,
+                                auth_token.as_deref(),
                             ) {
                                 console::error(format!(
                                     "处理 {} 的 HTTP 连接失败: {}",
@@ -115,6 +129,8 @@ fn handle_connection(
     plugin_id: i32,
     bind_addr: &str,
     allow_remote: bool,
+    auth_enabled: bool,
+    auth_token: Option<&str>,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -162,6 +178,13 @@ fn handle_connection(
         );
     }
 
+    if request.path == "/mcp" && auth_enabled {
+        if let Err(error) = authorize_request(&request.headers, auth_token) {
+            console::warn(format!("已拒绝未授权请求: {}", peer));
+            return write_http_error_response(stream, error);
+        }
+    }
+
     let ctx = mcp::McpContext {
         plugin_id,
         bind_addr,
@@ -198,6 +221,14 @@ fn handle_connection(
     ));
 
     write_http_json_response(stream, status, &body)
+}
+
+fn write_http_error_response(stream: &mut TcpStream, error: AuthError) -> Result<(), String> {
+    let body = format!(
+        "{{\"success\":false,\"error\":\"{}\"}}",
+        escape_json_string(error.message())
+    );
+    write_http_json_response(stream, error.status(), &body)
 }
 
 struct HttpRequest {

@@ -45,16 +45,26 @@ pub fn init_runtime(plugin_id: i32, exported_functions: *const ExportedFunctions
 
     let config = RuntimeConfig::load();
     console::initialize(config.console_log_enabled, config.console_title.as_str());
+    if let Err(error) = config.validate_startup_policy() {
+        console::error(format!("启动策略校验失败: {}", error));
+        return;
+    }
     console::info(format!(
-        "插件启动中: version={} plugin_id={} 监听地址={} allow_remote={} 超时={}ms",
+        "插件启动中: version={} plugin_id={} 监听地址={} allow_remote={} auth_enabled={} 超时={}ms",
         build_version(),
         plugin_id,
         config.bind_addr,
         config.allow_remote,
+        config.auth_enabled,
         config.dispatch_timeout_ms
     ));
     let dispatcher = MainThreadDispatcher::new();
-    let server = StreamableHttpServer::new(config.bind_addr.clone(), config.allow_remote);
+    let server = StreamableHttpServer::new(
+        config.bind_addr.clone(),
+        config.allow_remote,
+        config.auth_enabled,
+        config.auth_token.clone(),
+    );
     let app = Arc::new(AppState::new(
         plugin_id,
         config,
