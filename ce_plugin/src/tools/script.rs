@@ -258,6 +258,18 @@ where
         return Err("CE returned null lua state".to_owned());
     }
 
+    let state_addr = state as usize;
+    if state_addr == usize::MAX || state_addr == 0xFFFF_FFFF || state_addr < 0x10000 {
+        console::error(format!(
+            "[script] step=get_lua_state_invalid state_ptr={:p}",
+            state
+        ));
+        return Err(format!(
+            "CE returned invalid lua state pointer: {:p}",
+            state
+        ));
+    }
+
     console::info("[script] step=resolve_lua_api_begin");
     let lua = resolve_lua_api()?;
     console::info(format!(
