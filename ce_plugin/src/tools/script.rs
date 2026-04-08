@@ -238,16 +238,32 @@ where
         return Err("script execution requires window-message-hook dispatcher mode".to_owned());
     }
 
+    console::info("[script] step=get_lua_state_export_begin");
     let get_lua_state = app
         .exported_functions()
         .get_lua_state
         .ok_or_else(|| "CE get_lua_state export unavailable".to_owned())?;
+    console::info(format!(
+        "[script] step=get_lua_state_export_end fn_ptr={:p}",
+        get_lua_state as *const ()
+    ));
+
+    console::info("[script] step=get_lua_state_call_begin");
     let state = unsafe { get_lua_state() }.cast::<LuaState>();
+    console::info(format!(
+        "[script] step=get_lua_state_call_end state_ptr={:p}",
+        state
+    ));
     if state.is_null() {
         return Err("CE returned null lua state".to_owned());
     }
 
+    console::info("[script] step=resolve_lua_api_begin");
     let lua = resolve_lua_api()?;
+    console::info(format!(
+        "[script] step=resolve_lua_api_end lua_module={}",
+        lua.module_name
+    ));
     console::info(format!(
         "[script] step=runtime_ready lua_module={} state_ptr={:p}",
         lua.module_name, state
