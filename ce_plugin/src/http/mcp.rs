@@ -186,7 +186,6 @@ fn handle_tools_list() -> ToolResponse {
                 "annotations": {
                     "category": tool.category,
                     "requiresSerializedDispatch": tool.requires_serialized_dispatch,
-                    "aliases": tool.aliases,
                 }
             })
         })
@@ -209,8 +208,8 @@ fn handle_tools_call(params_json: &str) -> ToolResponse {
         }
     };
 
-    let tool_name = tools::canonical_name(params.name.as_str()).to_owned();
-    let Some(_spec) = tools::find_tool(tool_name.as_str()) else {
+    let tool_name = params.name.trim();
+    let Some(_spec) = tools::find_tool(tool_name) else {
         return ToolResponse {
             success: false,
             body_json: format!("method not found: {}", tool_name),
@@ -225,9 +224,9 @@ fn handle_tools_call(params_json: &str) -> ToolResponse {
     };
 
     let response = if let Some(app) = runtime::app_state() {
-        app.dispatch_tool(tool_name.as_str(), arguments_json.as_str())
+        app.dispatch_tool(tool_name, arguments_json.as_str())
     } else {
-        tools::dispatch(tool_name.as_str(), arguments_json.as_str())
+        tools::dispatch(tool_name, arguments_json.as_str())
     };
 
     if response.success {

@@ -7,7 +7,6 @@ use serde::Deserialize;
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub host: String,
-    pub port: u16,
     pub bind_addr: String,
     pub allow_remote: bool,
     pub auth_enabled: bool,
@@ -62,7 +61,6 @@ impl RuntimeConfig {
 
         Self {
             host: host.clone(),
-            port,
             bind_addr: format_bind_addr(host.as_str(), port),
             allow_remote,
             auth_enabled: json_config.auth.enabled.unwrap_or(false),

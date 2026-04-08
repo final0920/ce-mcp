@@ -17,7 +17,7 @@ mod util;
 
 use std::cell::Cell;
 
-pub use registry::{all_tools, canonical_name, find_tool};
+pub use registry::{all_tools, find_tool};
 
 thread_local! {
     static MAIN_THREAD_DISPATCH_DEPTH: Cell<usize> = Cell::new(0);
