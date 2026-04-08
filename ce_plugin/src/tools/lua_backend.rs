@@ -18,6 +18,7 @@ const LUA_BACKEND_TRANSPORT_SUBMIT: &str = "__ce_mcp_embedded_transport_submit_j
 const LUA_BACKEND_TRANSPORT_STEP: &str = "__ce_mcp_embedded_transport_step_json";
 const LUA_BACKEND_TRANSPORT_RECV: &str = "__ce_mcp_embedded_transport_recv_json";
 const LUA_BACKEND_READY: &str = "ce-mcp-rust-lua-backend-ready";
+const MAX_TRANSPORT_PUMPS: usize = 8;
 
 static LUA_BACKEND_STATE: OnceLock<Mutex<BackendState>> = OnceLock::new();
 static LUA_BOOTSTRAP_CHUNK: OnceLock<String> = OnceLock::new();
@@ -178,6 +179,8 @@ fn ensure_backend_bootstrapped() -> Result<(), String> {
     }
 
     guard.bootstrapped = true;
+    drop(guard);
+    ensure_runtime_started()?;
     console::info("[lua_backend] step=bootstrap_end success=true");
     Ok(())
 }
@@ -202,45 +205,7 @@ fn dispatch_to_lua(method: &str, params_json: &str) -> Result<ToolResponse, Stri
         method, request_id
     ));
 
-    console::info(format!(
-        "[lua_backend] step=transport_step_begin function={} method={} request_id={}",
-        LUA_BACKEND_TRANSPORT_STEP, method, request_id
-    ));
-    let step = call_json_global(LUA_BACKEND_TRANSPORT_STEP, &["1"])?;
-    ensure_success(LUA_BACKEND_TRANSPORT_STEP, &step)?;
-    console::info(format!(
-        "[lua_backend] step=transport_step_end method={} request_id={} processed={}",
-        method,
-        request_id,
-        step.get("processed").and_then(Value::as_u64).unwrap_or(0)
-    ));
-
-    console::info(format!(
-        "[lua_backend] step=transport_recv_begin function={} method={} request_id={}",
-        LUA_BACKEND_TRANSPORT_RECV, method, request_id
-    ));
-    let recv = call_json_global(LUA_BACKEND_TRANSPORT_RECV, &[])?;
-    ensure_success(LUA_BACKEND_TRANSPORT_RECV, &recv)?;
-    console::info(format!(
-        "[lua_backend] step=transport_recv_end method={} request_id={}",
-        method, request_id
-    ));
-
-    let response = recv
-        .get("response")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "lua backend transport recv returned no response envelope".to_owned())?;
-
-    let response_id = response
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "lua backend transport response missing id".to_owned())?;
-    if response_id != request_id {
-        return Err(format!(
-            "lua backend transport response id mismatch: expected {}, got {}",
-            request_id, response_id
-        ));
-    }
+    let response = recv_response_for_request(method, &request_id)?;
 
     let encoded = response
         .get("body_json")
@@ -313,6 +278,96 @@ fn next_request_id() -> Result<String, String> {
         .map_err(|_| "lua backend state lock poisoned".to_owned())?;
     guard.next_request_id = guard.next_request_id.saturating_add(1);
     Ok(format!("rust-req-{}", guard.next_request_id))
+}
+
+fn ensure_runtime_started() -> Result<(), String> {
+    let status = call_json_global(LUA_BACKEND_RUNTIME_STATUS, &[])?;
+    ensure_success(LUA_BACKEND_RUNTIME_STATUS, &status)?;
+    if status
+        .get("running")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        console::info("[lua_backend] step=runtime_status running=true");
+        return Ok(());
+    }
+
+    console::warn("[lua_backend] step=runtime_status running=false, restarting");
+    let start = call_json_global(
+        LUA_BACKEND_RUNTIME_START,
+        &["{\"reason\":\"rust-ensure-runtime\"}"],
+    )?;
+    ensure_success(LUA_BACKEND_RUNTIME_START, &start)?;
+    if !start
+        .get("running")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("embedded runtime start returned non-running state".to_owned());
+    }
+    console::info("[lua_backend] step=runtime_start success=true");
+    Ok(())
+}
+
+fn recv_response_for_request(
+    method: &str,
+    request_id: &str,
+) -> Result<serde_json::Map<String, Value>, String> {
+    for pump in 1..=MAX_TRANSPORT_PUMPS {
+        console::info(format!(
+            "[lua_backend] step=transport_step_begin function={} method={} request_id={} pump={}",
+            LUA_BACKEND_TRANSPORT_STEP, method, request_id, pump
+        ));
+        let step = call_json_global(LUA_BACKEND_TRANSPORT_STEP, &["1"])?;
+        ensure_success(LUA_BACKEND_TRANSPORT_STEP, &step)?;
+        console::info(format!(
+            "[lua_backend] step=transport_step_end method={} request_id={} pump={} processed={} idle={}",
+            method,
+            request_id,
+            pump,
+            step.get("processed").and_then(Value::as_u64).unwrap_or(0),
+            step.get("idle").and_then(Value::as_bool).unwrap_or(false)
+        ));
+
+        console::info(format!(
+            "[lua_backend] step=transport_recv_begin function={} method={} request_id={} pump={}",
+            LUA_BACKEND_TRANSPORT_RECV, method, request_id, pump
+        ));
+        let recv = call_json_global(LUA_BACKEND_TRANSPORT_RECV, &[])?;
+        ensure_success(LUA_BACKEND_TRANSPORT_RECV, &recv)?;
+        console::info(format!(
+            "[lua_backend] step=transport_recv_end method={} request_id={} pump={} idle={}",
+            method,
+            request_id,
+            pump,
+            recv.get("idle").and_then(Value::as_bool).unwrap_or(false)
+        ));
+
+        let Some(response) = recv.get("response").and_then(Value::as_object) else {
+            if recv.get("idle").and_then(Value::as_bool).unwrap_or(false) {
+                continue;
+            }
+            return Err("lua backend transport recv returned no response envelope".to_owned());
+        };
+
+        let response_id = response
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "lua backend transport response missing id".to_owned())?;
+        if response_id == request_id {
+            return Ok(response.clone());
+        }
+
+        console::warn(format!(
+            "[lua_backend] step=transport_recv_skip method={} expected_id={} got_id={} pump={}",
+            method, request_id, response_id, pump
+        ));
+    }
+
+    Err(format!(
+        "lua backend transport timed out waiting for response {} after {} pumps",
+        request_id, MAX_TRANSPORT_PUMPS
+    ))
 }
 
 fn bootstrap_chunk() -> &'static str {
