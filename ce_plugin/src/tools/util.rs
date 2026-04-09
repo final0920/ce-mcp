@@ -42,6 +42,36 @@ pub fn escape_json(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+pub fn lua_string_literal(value: &str) -> String {
+    for depth in 0..8 {
+        let eq = "=".repeat(depth);
+        let close = format!("]{}]", eq);
+        if !value.contains(&close) {
+            return format!("[{}[{}]{}]", eq, value, eq);
+        }
+    }
+
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+pub fn lua_scalar_literal(value: &Value) -> Result<String, String> {
+    match value {
+        Value::String(text) => Ok(lua_string_literal(text)),
+        Value::Bool(flag) => Ok(flag.to_string()),
+        Value::Number(number) => Ok(number.to_string()),
+        Value::Null => Ok("nil".to_owned()),
+        _ => Err("value must be a scalar json value".to_owned()),
+    }
+}
+
+pub fn lua_array_literal(values: &[Value]) -> Result<String, String> {
+    let mut rendered = Vec::with_capacity(values.len());
+    for value in values {
+        rendered.push(lua_scalar_literal(value)?);
+    }
+    Ok(format!("{{{}}}", rendered.join(", ")))
+}
+
 pub fn parse_address(value: Option<&Value>) -> Result<usize, String> {
     let Some(value) = value else {
         return Err("missing address".to_owned());

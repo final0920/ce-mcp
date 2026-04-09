@@ -1,4 +1,4 @@
-# ce-mcp / ce_plugin
+﻿# ce-mcp / ce_plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#requirements)
@@ -6,7 +6,7 @@
 
 Single-DLL Cheat Engine plugin runtime for `ce-mcp`.
 
-The official delivery model remains **one `ce_plugin.dll`**. Version 0.3.0 is a **clean rewrite** that keeps Rust as the formal product surface and removes historical compatibility debt from the official design. Users do **not** manually load a separate Lua bridge or manage a second runtime component.
+The official delivery model remains **one `ce_plugin.dll`**. Version 0.3.0 is a **clean rewrite** that keeps Rust as the formal product surface and removes historical compatibility debt from the official design. Users do **not** manually load a separate bridge or manage a second runtime component.
 
 **Language**: [English](./README.md) | [简体中文](./README.zh-CN.md)
 
@@ -24,7 +24,6 @@ The official delivery model remains **one `ce_plugin.dll`**. Version 0.3.0 is a 
 - Historical compatibility debt is not part of the 0.3.0 target
 - Legacy Lua materials are reference material only, not a product contract
 - External versioning follows `ce_plugin/Cargo.toml` and this README
-- Canonical integration note: [docs/integration-0.3.0.md](./docs/integration-0.3.0.md)
 
 ## Overview
 
@@ -82,7 +81,7 @@ ce_plugin/target/release/ce_plugin.dll
 2. Load `ce_plugin.dll` as a plugin.
 3. Attach a target process.
 4. Confirm the plugin console shows runtime status.
-5. Do **not** manually load an extra Lua bridge; Phase 1 backend bootstrap is owned by the plugin.
+5. Do **not** manually load extra bridge assets; runtime bootstrap is owned by the plugin.
 
 ### 3. Connect MCP Client
 
@@ -93,7 +92,7 @@ The exact client config depends on whether the MCP client supports HTTP or Strea
 
 ## Runtime Notes
 
-- The official backend direction for process / memory / analysis tooling is CE-first execution through the embedded Lua backend. Native WinAPI / process-handle paths are no longer the architectural baseline for DMA-oriented scenarios.
+- The official backend direction for process / memory / analysis tooling is CE-first execution through the CE-native runtime bridge exposed by `get_lua_state`. Native WinAPI / process-handle paths are no longer the architectural baseline for DMA-oriented scenarios.
 - `dispatcher_mode = window-message-hook` means CE main-window dispatch hook is active.
 - `script_runtime_ready = true` means script-sensitive tools and backend-bootstrap-dependent CE paths are available.
 - If the hook cannot be installed, the plugin may fall back to `serialized-worker`.
@@ -225,6 +224,7 @@ Example:
   "runtime": {
     "dispatch_timeout_ms": 5000,
     "console_log_enabled": true,
+    "debug_enabled": false,
     "console_title": "流云MCP插件"
   }
 }
@@ -232,7 +232,7 @@ Example:
 
 `0.0.0.0` or public bind targets require `auth.enabled=true` and a non-empty bearer token.
 
-For the full client-facing integration path, handshake sequence, and clean-rewrite non-goals, see [docs/integration-0.3.0.md](./docs/integration-0.3.0.md).
+Client-facing integration follows the MCP HTTP endpoint (`/mcp`) and health endpoint (`/health`) described in this README. When `runtime.debug_enabled=true`, the plugin also writes a Chinese debug log file named `ce_plugin.debug.log` beside the DLL for troubleshooting.
 
 ## Project Layout
 
@@ -245,12 +245,9 @@ ce-mcp/
 └─ LICENSE
 ```
 
-Additional integration notes:
-- English: [docs/integration-0.3.0.md](./docs/integration-0.3.0.md)
-- 中文: [docs/integration-0.3.0.zh-CN.md](./docs/integration-0.3.0.zh-CN.md)
 
 ## License
 
 MIT. See [LICENSE](./LICENSE).
 
-Embedded Lua assets, when migrated into the plugin, follow the same repository-level `ce-mcp / ce_plugin` product identity and fork notice. They are implementation details, not a separately versioned end-user product.
+CE-native inline runtime snippets used by the plugin follow the same repository-level `ce-mcp / ce_plugin` product identity and fork notice. They are implementation details, not a separately versioned end-user product.

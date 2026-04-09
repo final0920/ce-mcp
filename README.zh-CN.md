@@ -1,4 +1,4 @@
-# ce-mcp / ce_plugin
+﻿# ce-mcp / ce_plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#环境要求)
@@ -6,7 +6,7 @@
 
 `ce-mcp` 的单 DLL Cheat Engine 插件运行时。
 
-正式交付形态保持为 **一个 `ce_plugin.dll`**。0.3.0 按 **clean rewrite / 清爽重构** 推进，以 Rust 作为唯一正式产品面，不再背历史兼容债务。用户**不需要**手动加载额外 Lua bridge，也不需要维护第二套运行组件。
+正式交付形态保持为 **一个 `ce_plugin.dll`**。0.3.0 按 **clean rewrite / 清爽重构** 推进，以 Rust 作为唯一正式产品面，不再背历史兼容债务。用户**不需要**手动加载额外 bridge，也不需要维护第二套运行组件。
 
 **语言**: [English](./README.md) | [简体中文](./README.zh-CN.md)
 
@@ -24,7 +24,6 @@
 - 历史兼容债务不再纳入 0.3.0 正式目标
 - 旧 Lua 材料只保留为参考，不再作为产品契约
 - 对外版本口径以 `ce_plugin/Cargo.toml` 与本 README 为准
-- 正式接入说明：[`docs/integration-0.3.0.zh-CN.md`](./docs/integration-0.3.0.zh-CN.md)
 
 ## 项目定位
 
@@ -35,7 +34,7 @@
 - Cheat Engine 负责真实的运行时调试、内存访问、断点、脚本执行与动态观察
 - MCP 客户端负责把工具暴露给 AI Agent
 - Rust 负责插件壳层与传输面
-- 在比直接 WinAPI 更可靠的场景下，CE 原生能力会逐步通过内嵌 Lua 后端承接
+- 在比直接 WinAPI 更可靠的场景下，CE 原生能力通过 `get_lua_state` 暴露的 CE-native runtime bridge 承接
 - 大模型负责提出假设、规划步骤、关联证据、解释现象、推动逆向分析闭环
 
 也就是说，模型不再只是“纸上谈兵”，而是可以真正调用 CE 去做：
@@ -82,7 +81,7 @@ ce_plugin/target/release/ce_plugin.dll
 2. 以插件方式加载 `ce_plugin.dll`。
 3. 附加目标进程。
 4. 查看插件控制台是否打印运行状态。
-5. **不要**再手动加载额外 Lua bridge；Phase 1 后端 bootstrap 由插件自身负责。
+5. **不要**再手动加载额外 bridge 资产；运行时 bootstrap 由插件自身负责。
 
 ### 3. 连接 MCP 客户端
 
@@ -93,7 +92,7 @@ ce_plugin/target/release/ce_plugin.dll
 
 ## 运行说明
 
-- 进程 / 内存 / 分析工具的正式后端方向是经由内嵌 Lua 后端走 CE-first 执行路径。原生 WinAPI / process handle 主路径不再是 DMA 类场景的架构基线。
+- 进程 / 内存 / 分析工具的正式后端方向是经由 `get_lua_state` 暴露的 CE-native runtime bridge 走 CE-first 执行路径。原生 WinAPI / process handle 主路径不再是 DMA 类场景的架构基线。
 - `dispatcher_mode = window-message-hook` 表示已成功挂入 CE 主窗口消息调度链。
 - `script_runtime_ready = true` 表示脚本敏感工具以及依赖后端 bootstrap 的 CE 路径已经可用。
 - 若安装 hook 失败，插件可能回退为 `serialized-worker`。
@@ -225,6 +224,7 @@ ce_plugin/target/release/ce_plugin.dll
   "runtime": {
     "dispatch_timeout_ms": 5000,
     "console_log_enabled": true,
+    "debug_enabled": false,
     "console_title": "流云MCP插件"
   }
 }
@@ -232,7 +232,7 @@ ce_plugin/target/release/ce_plugin.dll
 
 当监听 `0.0.0.0` 或公网地址时，必须启用 `auth.enabled=true` 且提供非空 Bearer Token。
 
-完整接入流程、握手顺序和 clean rewrite 非目标，请看 [`docs/integration-0.3.0.zh-CN.md`](./docs/integration-0.3.0.zh-CN.md)。
+客户端接入以本 README 中说明的 MCP HTTP 入口（`/mcp`）和健康检查（`/health`）为准。当 `runtime.debug_enabled=true` 时，插件还会在 DLL 同级目录生成简体中文调试日志文件 `ce_plugin.debug.log`，便于排查问题。
 
 ## 项目结构
 
@@ -245,12 +245,9 @@ ce-mcp/
 └─ LICENSE
 ```
 
-补充接入说明：
-- English: [docs/integration-0.3.0.md](./docs/integration-0.3.0.md)
-- 中文: [docs/integration-0.3.0.zh-CN.md](./docs/integration-0.3.0.zh-CN.md)
 
 ## 许可证
 
 MIT，详见 [LICENSE](./LICENSE)。
 
-后续内嵌进插件的 Lua 资产也遵循同一套仓库级 `ce-mcp / ce_plugin` 产品身份与 fork notice，不再以“独立脚本产品”方式对外描述。
+后续由插件内联使用的 CE runtime 代码片段也遵循同一套仓库级 `ce-mcp / ce_plugin` 产品身份与 fork notice，不再以“独立脚本产品”方式对外描述。

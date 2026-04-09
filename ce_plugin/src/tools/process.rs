@@ -1,6 +1,6 @@
-use serde_json::{json, Value};
+﻿use serde_json::{json, Value};
 
-use super::{addressing, lua_client, util, ToolResponse};
+use super::{addressing, lua_host, util, ToolResponse};
 use crate::runtime;
 
 const METHODS: &[&str] = &[
@@ -13,6 +13,21 @@ const METHODS: &[&str] = &[
     "normalize_address",
     "get_rtti_classname",
 ];
+
+const LUA_TO_HEX_HELPER: &str = r###"
+local function ce_mcp_to_hex(num)
+    if not num then return "nil" end
+    if num < 0 then
+        return string.format("-0x%X", -num)
+    elseif num > 0xFFFFFFFF then
+        local high = math.floor(num / 0x100000000)
+        local low = num % 0x100000000
+        return string.format("0x%X%08X", high, low)
+    else
+        return string.format("0x%08X", num)
+    end
+end
+"###;
 
 pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
     let response = match method {
@@ -36,8 +51,7 @@ pub fn supported_methods() -> &'static [&'static str] {
 }
 
 pub(crate) fn current_modules() -> Vec<runtime::ModuleInfo> {
-    // 模块视图现在只来自 embedded Lua/CE backend；
-    // 不再回退 Toolhelp32，避免宿主快照边界重新扩散回调用侧。
+    // Module state must come from Cheat Engine's own runtime capabilities.
     lua_modules_from_backend().unwrap_or_default()
 }
 
@@ -66,10 +80,227 @@ fn ping() -> ToolResponse {
     }
 }
 
-fn call_lua_json_tool(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
-    lua_client::call_tool_json(method, params_json)
+fn call_ce_json_tool_from_json(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
+    let params = util::parse_params(params_json).map_err(error_response)?;
+    call_ce_json_tool(method, &params)
 }
 
+fn call_ce_json_tool(method: &str, params: &Value) -> Result<Value, ToolResponse> {
+    match method {
+        "get_process_info" => ce_get_process_info(),
+        "enum_modules" => ce_enum_modules(),
+        "get_thread_list" => ce_get_thread_list(),
+        "get_symbol_address" => ce_get_symbol_address(params),
+        "get_address_info" => ce_get_address_info(params),
+        "get_rtti_classname" => ce_get_rtti_classname(params),
+        other => Err(error_response(format!("unsupported CE process tool: {}", other))),
+    }
+}
+
+fn execute_ce_process_snippet(code: &str) -> Result<Value, ToolResponse> {
+    lua_host::execute_snippet_result(code).map_err(error_response)
+}
+
+fn ce_get_process_info() -> Result<Value, ToolResponse> {
+    let code = format!(
+        r###"{}
+pcall(reinitializeSymbolhandler)
+local pid = getOpenedProcessID()
+if not pid or pid == 0 then
+    return {{ success = false, error = "No process attached" }}
+end
+
+local modules = enumModules(pid)
+if not modules or #modules == 0 then
+    modules = enumModules()
+end
+
+local module_list = {{}}
+for i, module in ipairs(modules or {{}}) do
+    if i > 50 then break end
+    table.insert(module_list, {{
+        name = module.Name or "???",
+        address = ce_mcp_to_hex(module.Address or 0),
+        size = module.Size or 0,
+        path = module.PathToFile or module.Path or ""
+    }})
+end
+
+local process_name = (process and process ~= "" and process) or "L2.exe"
+return {{
+    success = true,
+    process_id = pid,
+    process_name = process_name,
+    module_count = #module_list,
+    modules = module_list,
+    used_aob_fallback = false
+}}
+"###,
+        LUA_TO_HEX_HELPER
+    );
+    execute_ce_process_snippet(&code)
+}
+
+fn ce_enum_modules() -> Result<Value, ToolResponse> {
+    let code = format!(
+        r###"{}
+local pid = getOpenedProcessID()
+local modules = enumModules(pid)
+if not modules or #modules == 0 then
+    modules = enumModules()
+end
+
+local result = {{}}
+for _, module in ipairs(modules or {{}}) do
+    table.insert(result, {{
+        name = module.Name or "???",
+        address = ce_mcp_to_hex(module.Address or 0),
+        size = module.Size or 0,
+        path = module.PathToFile or module.Path or ""
+    }})
+end
+
+return {{ success = true, count = #result, modules = result }}
+"###,
+        LUA_TO_HEX_HELPER
+    );
+    execute_ce_process_snippet(&code)
+}
+
+fn ce_get_thread_list() -> Result<Value, ToolResponse> {
+    let code = r###"
+local list = createStringlist()
+getThreadlist(list)
+
+local threads = {}
+for i = 0, list.Count - 1 do
+    local id_hex = list[i]
+    table.insert(threads, {
+        id_hex = id_hex,
+        id_int = tonumber(id_hex, 16)
+    })
+end
+
+list.destroy()
+return { success = true, count = #threads, threads = threads }
+"###;
+    execute_ce_process_snippet(code)
+}
+
+fn ce_get_symbol_address(params: &Value) -> Result<Value, ToolResponse> {
+    let symbol = params
+        .get("symbol")
+        .or_else(|| params.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| error_response("missing symbol".to_owned()))?;
+    let symbol_lua = util::lua_string_literal(symbol);
+    let code = format!(
+        r###"{}
+local symbol = {}
+local addr = getAddressSafe(symbol)
+if addr then
+    return {{ success = true, symbol = symbol, address = ce_mcp_to_hex(addr), value = addr }}
+end
+return {{ success = false, error = "Symbol not found: " .. symbol }}
+"###,
+        LUA_TO_HEX_HELPER, symbol_lua
+    );
+    execute_ce_process_snippet(&code)
+}
+
+fn ce_get_address_info(params: &Value) -> Result<Value, ToolResponse> {
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
+    let include_modules = params
+        .get("include_modules")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        .to_string();
+    let include_symbols = params
+        .get("include_symbols")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        .to_string();
+    let include_sections = params
+        .get("include_sections")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .to_string();
+
+    let code = format!(
+        r###"{}
+local address = {}
+local include_modules = {}
+local include_symbols = {}
+local include_sections = {}
+if type(address) == "string" then address = getAddressSafe(address) end
+if not address then return {{ success = false, error = "Invalid address" }} end
+
+local symbolic_name = getNameFromAddress(address, include_modules, include_symbols, include_sections)
+local is_in_module = false
+local ok_in_module, in_module_result = pcall(inModule, address)
+if ok_in_module and in_module_result then
+    is_in_module = true
+elseif symbolic_name and symbolic_name:match("%+") then
+    is_in_module = true
+end
+if symbolic_name and symbolic_name:match("^%x+$") then
+    symbolic_name = "0x" .. symbolic_name
+end
+
+return {{
+    success = true,
+    address = ce_mcp_to_hex(address),
+    symbolic_name = symbolic_name or ce_mcp_to_hex(address),
+    is_in_module = is_in_module,
+    options_used = {{
+        include_modules = include_modules,
+        include_symbols = include_symbols,
+        include_sections = include_sections,
+    }}
+}}
+"###,
+        LUA_TO_HEX_HELPER, address_lua, include_modules, include_symbols, include_sections
+    );
+    execute_ce_process_snippet(&code)
+}
+
+fn ce_get_rtti_classname(params: &Value) -> Result<Value, ToolResponse> {
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
+    let code = format!(
+        r###"{}
+local address = {}
+if type(address) == "string" then address = getAddressSafe(address) end
+if not address then return {{ success = false, error = "Invalid address" }} end
+
+local class_name = getRTTIClassName(address)
+if class_name then
+    return {{
+        success = true,
+        address = ce_mcp_to_hex(address),
+        class_name = class_name,
+        found = true
+    }}
+end
+return {{
+    success = true,
+    address = ce_mcp_to_hex(address),
+    class_name = nil,
+    found = false,
+    note = "No RTTI information found at this address"
+}}
+"###,
+        LUA_TO_HEX_HELPER, address_lua
+    );
+    execute_ce_process_snippet(&code)
+}
 fn is_no_process_attached_response(response: &ToolResponse) -> bool {
     response.body_json.contains("No process attached")
 }
@@ -84,12 +315,12 @@ fn unattached_process_info_body() -> Value {
         "modules": [],
         "main_module": Value::Null,
         "architecture": "x64",
-        "note": "no process attached (lua backend)"
+        "note": "no process attached (ce runtime)"
     })
 }
 
 fn lua_current_process_id() -> Result<u32, ToolResponse> {
-    match call_lua_json_tool("get_process_info", "{}") {
+    match call_ce_json_tool_from_json("get_process_info", "{}") {
         Ok(body) => Ok(body
             .get("process_id")
             .and_then(Value::as_u64)
@@ -182,7 +413,7 @@ fn enrich_lua_modules_in_place(body: &mut Value) -> Vec<runtime::ModuleInfo> {
 }
 
 fn lua_modules_from_backend() -> Result<Vec<runtime::ModuleInfo>, ToolResponse> {
-    let mut body = match call_lua_json_tool("enum_modules", "{}") {
+    let mut body = match call_ce_json_tool_from_json("enum_modules", "{}") {
         Ok(value) => value,
         Err(response) if is_no_process_attached_response(&response) => return Ok(Vec::new()),
         Err(response) => return Err(response),
@@ -202,7 +433,7 @@ fn main_module_json(module: &runtime::ModuleInfo) -> Value {
 }
 
 fn get_process_info() -> ToolResponse {
-    match call_lua_json_tool("get_process_info", "{}") {
+    match call_ce_json_tool_from_json("get_process_info", "{}") {
         Ok(mut body) => {
             let modules = enrich_lua_modules_in_place(&mut body);
             let attached = body.get("process_id").and_then(Value::as_u64).unwrap_or(0) != 0;
@@ -217,7 +448,7 @@ fn get_process_info() -> ToolResponse {
                 if !object.contains_key("note") {
                     object.insert(
                         "note".to_owned(),
-                        json!("live process response via embedded lua backend"),
+                        json!("live process response via CE runtime"),
                     );
                 }
                 if !object.contains_key("main_module") {
@@ -260,7 +491,7 @@ fn enum_modules() -> ToolResponse {
         };
     }
 
-    let mut body = match call_lua_json_tool("enum_modules", "{}") {
+    let mut body = match call_ce_json_tool_from_json("enum_modules", "{}") {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -297,7 +528,7 @@ fn get_thread_list() -> ToolResponse {
         };
     }
 
-    let mut body = match call_lua_json_tool("get_thread_list", "{}") {
+    let mut body = match call_ce_json_tool_from_json("get_thread_list", "{}") {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -442,15 +673,15 @@ fn get_address_info(params_json: &str) -> ToolResponse {
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let lua_body = match call_lua_json_tool("get_address_info", params_json) {
+    let ce_body = match call_ce_json_tool_from_json("get_address_info", params_json) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    let address = match util::parse_address(lua_body.get("address")) {
+    let address = match util::parse_address(ce_body.get("address")) {
         Ok(address) => address,
         Err(error) => {
             return error_response(format!(
-                "lua backend get_address_info returned invalid address: {}",
+                "CE get_address_info returned invalid address: {}",
                 error
             ))
         }
@@ -468,7 +699,7 @@ fn get_address_info(params_json: &str) -> ToolResponse {
         include_sections,
     );
 
-    if let (Some(lua_object), Some(body_object)) = (lua_body.as_object(), body.as_object_mut()) {
+    if let (Some(lua_object), Some(body_object)) = (ce_body.as_object(), body.as_object_mut()) {
         if let Some(symbolic_name) = lua_object.get("symbolic_name") {
             body_object.insert("symbolic_name".to_owned(), symbolic_name.clone());
         }
@@ -496,7 +727,7 @@ fn get_address_info(params_json: &str) -> ToolResponse {
                             json!({
                                 "name": symbolic_name,
                                 "kind": "lua_symbolic_name",
-                                "resolved_by": "lua_backend",
+                                "resolved_by": "ce_runtime",
                             }),
                         );
                     }
@@ -557,12 +788,12 @@ fn get_rtti_classname(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    match lua_rtti_classname(address, &modules) {
+    match ce_rtti_classname(address, &modules) {
         Ok(body) => ToolResponse {
             success: true,
             body_json: body.to_string(),
         },
-        Err(error) => error_response(format!("lua RTTI lookup failed: {}", error)),
+        Err(error) => error_response(format!("CE RTTI lookup failed: {}", error)),
     }
 }
 
@@ -681,14 +912,14 @@ pub(crate) fn find_module_for_address<'a>(
     })
 }
 
-fn lua_rtti_classname(address: usize, modules: &[runtime::ModuleInfo]) -> Result<Value, String> {
-    let mut body = call_lua_json_tool(
+fn ce_rtti_classname(address: usize, modules: &[runtime::ModuleInfo]) -> Result<Value, String> {
+    let mut body = call_ce_json_tool_from_json(
         "get_rtti_classname",
         &json!({ "address": util::format_address(address) }).to_string(),
     )
     .map_err(|response| response.body_json)?;
     let Some(object) = body.as_object_mut() else {
-        return Err("lua get_rtti_classname returned non-object body".to_owned());
+        return Err("CE get_rtti_classname returned non-object body".to_owned());
     };
 
     object.insert("success".to_owned(), Value::Bool(true));

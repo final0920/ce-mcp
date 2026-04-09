@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{addressing, lua_client, process, util, ToolResponse};
+use super::{addressing, lua_host, process, util, ToolResponse};
 use crate::runtime;
 
 const METHODS: &[&str] = &[
@@ -13,6 +13,21 @@ const METHODS: &[&str] = &[
     "write_memory",
     "write_string",
 ];
+
+const LUA_TO_HEX_HELPER: &str = r###"
+local function ce_mcp_to_hex(num)
+    if not num then return "nil" end
+    if num < 0 then
+        return string.format("-0x%X", -num)
+    elseif num > 0xFFFFFFFF then
+        local high = math.floor(num / 0x100000000)
+        local low = num % 0x100000000
+        return string.format("0x%X%08X", high, low)
+    else
+        return string.format("0x%08X", num)
+    end
+end
+"###;
 
 pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
     let response = match method {
@@ -37,7 +52,7 @@ pub fn supported_methods() -> &'static [&'static str] {
 
 fn read_memory(params_json: &str) -> ToolResponse {
     let modules = process::current_modules();
-    let mut body = match call_lua_tool_json("read_memory", params_json) {
+    let mut body = match call_ce_tool_json("read_memory", params_json) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -46,7 +61,7 @@ fn read_memory(params_json: &str) -> ToolResponse {
         .and_then(|address| normalize_address(address, &modules));
 
     let Some(object) = body.as_object_mut() else {
-        return error_response("lua read_memory returned non-object body".to_owned());
+        return error_response("CE read_memory returned non-object body".to_owned());
     };
 
     object.insert("normalized_address".to_owned(), json!(normalized_address));
@@ -64,7 +79,7 @@ fn read_integer(params_json: &str) -> ToolResponse {
         .unwrap_or("dword")
         .to_owned();
     let modules = process::current_modules();
-    let mut body = match call_lua_tool_json("read_integer", params_json) {
+    let mut body = match call_ce_tool_json("read_integer", params_json) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -83,7 +98,7 @@ fn read_integer(params_json: &str) -> ToolResponse {
     );
 
     let Some(object) = body.as_object_mut() else {
-        return error_response("lua read_integer returned non-object body".to_owned());
+        return error_response("CE read_integer returned non-object body".to_owned());
     };
 
     object
@@ -119,7 +134,7 @@ fn read_string(params_json: &str) -> ToolResponse {
         .min(4096);
     let wide = params.get("wide").and_then(Value::as_bool).unwrap_or(false);
     let modules = process::current_modules();
-    let mut body = match call_lua_tool_json("read_string", params_json) {
+    let mut body = match call_ce_tool_json("read_string", params_json) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -128,7 +143,7 @@ fn read_string(params_json: &str) -> ToolResponse {
         .and_then(|address| normalize_address(address, &modules));
 
     let Some(object) = body.as_object_mut() else {
-        return error_response("lua read_string returned non-object body".to_owned());
+        return error_response("CE read_string returned non-object body".to_owned());
     };
 
     object.insert("normalized_address".to_owned(), json!(normalized_address));
@@ -158,7 +173,7 @@ fn read_pointer(params_json: &str) -> ToolResponse {
     }
 
     let modules = process::current_modules();
-    let mut body = match call_lua_tool_json("read_pointer", params_json) {
+    let mut body = match call_ce_tool_json("read_pointer", params_json) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -182,7 +197,7 @@ fn read_pointer(params_json: &str) -> ToolResponse {
     let value_normalized = pointer_value.and_then(|value| normalize_pointer_value(value, &modules));
 
     let Some(object) = body.as_object_mut() else {
-        return error_response("lua read_pointer returned non-object body".to_owned());
+        return error_response("CE read_pointer returned non-object body".to_owned());
     };
 
     if let Some(address) = address_text {
@@ -217,7 +232,7 @@ fn read_pointer_chain(params_json: &str) -> ToolResponse {
 
     let forwarded_params = params.to_string();
     let modules = process::current_modules();
-    let mut body = match call_lua_tool_json("read_pointer_chain", &forwarded_params) {
+    let mut body = match call_ce_tool_json("read_pointer_chain", &forwarded_params) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -242,7 +257,7 @@ fn read_pointer_chain(params_json: &str) -> ToolResponse {
     });
 
     let Some(object) = body.as_object_mut() else {
-        return error_response("lua read_pointer_chain returned non-object body".to_owned());
+        return error_response("CE read_pointer_chain returned non-object body".to_owned());
     };
 
     if let Some(base_address) = base_text {
@@ -296,7 +311,7 @@ fn write_memory(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    let mut body = match write_bytes_via_lua(address, &bytes) {
+    let mut body = match write_bytes_via_ce(address, &bytes) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -337,7 +352,7 @@ fn write_integer(params_json: &str) -> ToolResponse {
         Err(error) => return error_response(error),
     };
 
-    let mut body = match write_bytes_via_lua(address, &bytes) {
+    let mut body = match write_bytes_via_ce(address, &bytes) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -347,7 +362,7 @@ fn write_integer(params_json: &str) -> ToolResponse {
     }
 
     let Some(object) = body.as_object_mut() else {
-        return error_response("lua write_memory returned non-object body".to_owned());
+        return error_response("CE write_memory returned non-object body".to_owned());
     };
 
     object.insert("type".to_owned(), Value::String(integer_type.clone()));
@@ -367,7 +382,7 @@ fn write_integer(params_json: &str) -> ToolResponse {
     }
     object.insert(
         "write_path".to_owned(),
-        Value::String("embedded_lua.write_memory".to_owned()),
+        Value::String("ce_runtime.write_memory".to_owned()),
     );
 
     success_response(body)
@@ -404,7 +419,7 @@ fn write_string(params_json: &str) -> ToolResponse {
         bytes
     };
 
-    let mut body = match write_bytes_via_lua(address, &bytes) {
+    let mut body = match write_bytes_via_ce(address, &bytes) {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -414,27 +429,27 @@ fn write_string(params_json: &str) -> ToolResponse {
     }
 
     let Some(object) = body.as_object_mut() else {
-        return error_response("lua write_memory returned non-object body".to_owned());
+        return error_response("CE write_memory returned non-object body".to_owned());
     };
 
     object.insert("wide".to_owned(), Value::Bool(wide));
     object.insert("length".to_owned(), json!(value.len()));
     object.insert(
         "write_path".to_owned(),
-        Value::String("embedded_lua.write_memory".to_owned()),
+        Value::String("ce_runtime.write_memory".to_owned()),
     );
 
     success_response(body)
 }
 
-fn write_bytes_via_lua(address: usize, bytes: &[u8]) -> Result<Value, ToolResponse> {
+fn write_bytes_via_ce(address: usize, bytes: &[u8]) -> Result<Value, ToolResponse> {
     let forwarded_params = json!({
         "address": util::format_address(address),
         "bytes": bytes,
     })
     .to_string();
 
-    call_lua_tool_json("write_memory", &forwarded_params)
+    call_ce_tool_json("write_memory", &forwarded_params)
 }
 
 fn enrich_write_memory_response(
@@ -449,7 +464,7 @@ fn enrich_write_memory_response(
 
     let object = body
         .as_object_mut()
-        .ok_or_else(|| "lua write_memory returned non-object body".to_owned())?;
+        .ok_or_else(|| "CE write_memory returned non-object body".to_owned())?;
 
     object
         .entry("address".to_owned())
@@ -486,10 +501,201 @@ fn parse_byte_array(value: Option<&Value>) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-fn call_lua_tool_json(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
-    lua_client::call_tool_json(method, params_json)
+fn call_ce_tool_json(method: &str, params_json: &str) -> Result<Value, ToolResponse> {
+    let params = util::parse_params(params_json).map_err(error_response)?;
+    call_ce_memory_tool(method, &params)
 }
 
+fn execute_ce_memory_snippet(code: &str) -> Result<Value, ToolResponse> {
+    lua_host::execute_snippet_result(code).map_err(error_response)
+}
+
+fn call_ce_memory_tool(method: &str, params: &Value) -> Result<Value, ToolResponse> {
+    match method {
+        "read_memory" => ce_read_memory(params),
+        "read_integer" => ce_read_integer(params),
+        "read_string" => ce_read_string(params),
+        "read_pointer" => ce_read_pointer(params),
+        "read_pointer_chain" => ce_read_pointer_chain(params),
+        "write_memory" => ce_write_memory(params),
+        other => Err(error_response(format!("unsupported CE memory tool: {}", other))),
+    }
+}
+
+fn ce_read_memory(params: &Value) -> Result<Value, ToolResponse> {
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
+    let size = params
+        .get("size")
+        .and_then(Value::as_u64)
+        .unwrap_or(256)
+        .min(65_536);
+    let code = format!(
+        r###"{}
+local address = {}
+local size = {}
+if type(address) == "string" then address = getAddressSafe(address) end
+if not address then return {{ success = false, error = "Invalid address" }} end
+local bytes = readBytes(address, size, true)
+if not bytes then return {{ success = false, error = "Failed to read at " .. ce_mcp_to_hex(address) }} end
+local hex = {{}}
+for i, byte in ipairs(bytes) do hex[i] = string.format("%02X", byte) end
+return {{ success = true, address = ce_mcp_to_hex(address), size = #bytes, data = table.concat(hex, " "), bytes = bytes }}
+"###,
+        LUA_TO_HEX_HELPER, address_lua, size
+    );
+    execute_ce_memory_snippet(&code)
+}
+
+fn ce_read_integer(params: &Value) -> Result<Value, ToolResponse> {
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
+    let integer_type = params.get("type").and_then(Value::as_str).unwrap_or("dword");
+    let type_lua = util::lua_string_literal(integer_type);
+    let code = format!(
+        r###"{}
+local address = {}
+local integer_type = {}
+if type(address) == "string" then address = getAddressSafe(address) end
+if not address then return {{ success = false, error = "Invalid address" }} end
+local value = nil
+if integer_type == "byte" then
+    local bytes = readBytes(address, 1, true)
+    if bytes and #bytes > 0 then value = bytes[1] end
+elseif integer_type == "word" then value = readSmallInteger(address)
+elseif integer_type == "dword" then value = readInteger(address)
+elseif integer_type == "qword" then value = readQword(address)
+elseif integer_type == "float" then value = readFloat(address)
+elseif integer_type == "double" then value = readDouble(address)
+else return {{ success = false, error = "Unknown type: " .. tostring(integer_type) }} end
+if value == nil then return {{ success = false, error = "Failed to read at " .. ce_mcp_to_hex(address) }} end
+return {{ success = true, address = ce_mcp_to_hex(address), value = value, type = integer_type, hex = ce_mcp_to_hex(value) }}
+"###,
+        LUA_TO_HEX_HELPER, address_lua, type_lua
+    );
+    execute_ce_memory_snippet(&code)
+}
+
+fn ce_read_string(params: &Value) -> Result<Value, ToolResponse> {
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
+    let max_length = params.get("max_length").and_then(Value::as_u64).unwrap_or(256).min(4096);
+    let wide = params.get("wide").and_then(Value::as_bool).unwrap_or(false).to_string();
+    let code = format!(
+        r###"{}
+local address = {}
+local max_length = {}
+local wide = {}
+if type(address) == "string" then address = getAddressSafe(address) end
+if not address then return {{ success = false, error = "Invalid address" }} end
+local str = readString(address, max_length, wide)
+local sanitized = ""
+if str then
+    for i = 1, #str do
+        local byte = str:byte(i)
+        if byte >= 32 and byte < 127 then
+            sanitized = sanitized .. str:sub(i, i)
+        elseif byte == 9 or byte == 10 or byte == 13 then
+            sanitized = sanitized .. " "
+        else
+            sanitized = sanitized .. string.format("\\x%02X", byte)
+        end
+    end
+end
+return {{ success = true, address = ce_mcp_to_hex(address), value = sanitized, wide = wide, length = str and #str or 0, raw_length = #sanitized }}
+"###,
+        LUA_TO_HEX_HELPER, address_lua, max_length, wide
+    );
+    execute_ce_memory_snippet(&code)
+}
+
+fn ce_read_pointer(params: &Value) -> Result<Value, ToolResponse> {
+    let base = params.get("base").or_else(|| params.get("address")).ok_or_else(|| error_response("missing address".to_owned()))?;
+    let base_lua = util::lua_scalar_literal(base).map_err(error_response)?;
+    let offsets = params.get("offsets").and_then(Value::as_array).cloned().unwrap_or_default();
+    let offsets_lua = util::lua_array_literal(&offsets).map_err(error_response)?;
+    let code = format!(
+        r###"{}
+local base = {}
+local offsets = {}
+if type(base) == "string" then base = getAddressSafe(base) end
+if not base then return {{ success = false, error = "Invalid base address" }} end
+local current_address = base
+local path = {{ ce_mcp_to_hex(base) }}
+for _, offset in ipairs(offsets) do
+    local ptr = readPointer(current_address)
+    if not ptr then return {{ success = false, error = "Failed to read pointer at " .. ce_mcp_to_hex(current_address), path = path }} end
+    current_address = ptr + offset
+    table.insert(path, ce_mcp_to_hex(current_address))
+end
+local final_value = readPointer(current_address)
+return {{ success = true, base = ce_mcp_to_hex(base), final_address = ce_mcp_to_hex(current_address), value = final_value, path = path }}
+"###,
+        LUA_TO_HEX_HELPER, base_lua, offsets_lua
+    );
+    execute_ce_memory_snippet(&code)
+}
+
+fn ce_read_pointer_chain(params: &Value) -> Result<Value, ToolResponse> {
+    let base = params.get("base").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let base_lua = util::lua_scalar_literal(base).map_err(error_response)?;
+    let offsets = params.get("offsets").and_then(Value::as_array).cloned().unwrap_or_default();
+    let offsets_lua = util::lua_array_literal(&offsets).map_err(error_response)?;
+    let code = format!(
+        r###"{}
+local base = {}
+local offsets = {}
+if type(base) == "string" then base = getAddressSafe(base) end
+if not base then return {{ success = false, error = "Invalid base address" }} end
+local current_address = base
+local chain = {{ {{ step = 0, address = ce_mcp_to_hex(current_address), description = "base" }} }}
+for i, offset in ipairs(offsets) do
+    local ptr = readPointer(current_address)
+    if not ptr then return {{ success = false, error = "Failed to read pointer at step " .. i, partial_chain = chain, failed_at_address = ce_mcp_to_hex(current_address) }} end
+    current_address = ptr + offset
+    table.insert(chain, {{ step = i, address = ce_mcp_to_hex(current_address), offset = offset, hex_offset = string.format("+0x%X", offset), pointer_value = ce_mcp_to_hex(ptr) }})
+end
+local final_value = nil
+pcall(function() final_value = readPointer(current_address) end)
+return {{ success = true, base = ce_mcp_to_hex(base), offsets = offsets, final_address = ce_mcp_to_hex(current_address), final_value = final_value, chain = chain }}
+"###,
+        LUA_TO_HEX_HELPER, base_lua, offsets_lua
+    );
+    execute_ce_memory_snippet(&code)
+}
+
+fn ce_write_memory(params: &Value) -> Result<Value, ToolResponse> {
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
+    let bytes = params
+        .get("bytes")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| error_response("No bytes provided".to_owned()))?;
+    let bytes_lua = util::lua_array_literal(&bytes).map_err(error_response)?;
+    let code = format!(
+        r###"{}
+local address = {}
+local bytes = {}
+if type(address) == "string" then address = getAddressSafe(address) end
+if not address then return {{ success = false, error = "Invalid address" }} end
+if not bytes or #bytes == 0 then return {{ success = false, error = "No bytes provided" }} end
+local ok, err = pcall(writeBytes, address, bytes)
+if not ok then return {{ success = false, error = "Write failed: " .. tostring(err), address = ce_mcp_to_hex(address) }} end
+return {{ success = true, address = ce_mcp_to_hex(address), bytes_written = #bytes, size = #bytes }}
+"###,
+        LUA_TO_HEX_HELPER, address_lua, bytes_lua
+    );
+    execute_ce_memory_snippet(&code)
+}
 fn success_response(body: Value) -> ToolResponse {
     ToolResponse {
         success: true,

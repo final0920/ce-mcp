@@ -1,7 +1,8 @@
 #[cfg(windows)]
 mod imp {
-    use std::fs::OpenOptions;
+    use std::fs::{File, OpenOptions};
     use std::io::Write;
+    use std::path::Path;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,17 +27,19 @@ mod imp {
     struct ConsoleState {
         enabled: bool,
         owns_console: bool,
-        writer: Option<std::fs::File>,
+        writer: Option<File>,
+        debug_writer: Option<File>,
     }
 
     static CONSOLE: OnceLock<Mutex<ConsoleState>> = OnceLock::new();
 
-    pub fn initialize(enabled: bool, title: &str) {
+    pub fn initialize(enabled: bool, title: &str, debug_log_path: Option<&Path>) {
         let state = CONSOLE.get_or_init(|| {
             Mutex::new(ConsoleState {
                 enabled: false,
                 owns_console: false,
                 writer: None,
+                debug_writer: None,
             })
         });
 
@@ -46,9 +49,16 @@ mod imp {
 
         if !enabled {
             guard.enabled = false;
+            guard.debug_writer = open_debug_log(debug_log_path);
+            if guard.debug_writer.is_some() {
+                write_line_locked(&mut guard, "信息", "调试文件日志已启用");
+            }
             return;
         }
         if guard.enabled {
+            if guard.debug_writer.is_none() {
+                guard.debug_writer = open_debug_log(debug_log_path);
+            }
             return;
         }
 
@@ -57,6 +67,7 @@ mod imp {
         if writer.is_none() {
             guard.enabled = false;
             guard.owns_console = false;
+            guard.debug_writer = open_debug_log(debug_log_path);
             return;
         }
 
@@ -79,7 +90,11 @@ mod imp {
         guard.enabled = true;
         guard.owns_console = owns_console;
         guard.writer = writer;
+        guard.debug_writer = open_debug_log(debug_log_path);
         write_line_locked(&mut guard, "信息", "控制台日志已启用，编码已切换到 UTF-8");
+        if guard.debug_writer.is_some() {
+            write_line_locked(&mut guard, "信息", "调试文件日志已启用");
+        }
     }
 
     pub fn shutdown() {
@@ -90,11 +105,12 @@ mod imp {
             return;
         };
 
-        if guard.enabled {
-            write_line_locked(&mut guard, "信息", "控制台日志已关闭");
+        if guard.enabled || guard.debug_writer.is_some() {
+            write_line_locked(&mut guard, "信息", "日志系统已关闭");
         }
 
         guard.writer = None;
+        guard.debug_writer = None;
         let owns_console = guard.owns_console;
         guard.enabled = false;
         guard.owns_console = false;
@@ -125,7 +141,7 @@ mod imp {
         let Ok(mut guard) = state.lock() else {
             return;
         };
-        if !guard.enabled {
+        if !guard.enabled && guard.debug_writer.is_none() {
             return;
         }
 
@@ -133,16 +149,29 @@ mod imp {
     }
 
     fn write_line_locked(state: &mut ConsoleState, level: &str, message: &str) {
-        let Some(writer) = state.writer.as_mut() else {
-            return;
-        };
-
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_secs())
             .unwrap_or(0);
-        let _ = writeln!(writer, "[ce_plugin][{}][{}] {}", ts, level, message);
-        let _ = writer.flush();
+        let line = format!("[ce_plugin][{}][{}] {}", ts, level, message);
+
+        if let Some(writer) = state.writer.as_mut() {
+            let _ = writeln!(writer, "{}", line);
+            let _ = writer.flush();
+        }
+        if let Some(debug_writer) = state.debug_writer.as_mut() {
+            let _ = writeln!(debug_writer, "{}", line);
+            let _ = debug_writer.flush();
+        }
+    }
+
+    fn open_debug_log(path: Option<&Path>) -> Option<File> {
+        let path = path?;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
     }
 
     fn to_wide(value: &str) -> Vec<u16> {
@@ -152,7 +181,9 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn initialize(_enabled: bool, _title: &str) {}
+    use std::path::Path;
+
+    pub fn initialize(_enabled: bool, _title: &str, _debug_log_path: Option<&Path>) {}
     pub fn shutdown() {}
     pub fn info(_message: impl AsRef<str>) {}
     pub fn warn(_message: impl AsRef<str>) {}

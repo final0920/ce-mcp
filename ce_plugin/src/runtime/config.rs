@@ -13,6 +13,8 @@ pub struct RuntimeConfig {
     pub auth_token: Option<String>,
     pub dispatch_timeout_ms: u64,
     pub console_log_enabled: bool,
+    pub debug_enabled: bool,
+    pub debug_log_path: Option<PathBuf>,
     pub console_title: String,
     pub server_name: String,
     pub server_version: String,
@@ -44,6 +46,7 @@ struct JsonAuthConfig {
 struct JsonRuntimeConfig {
     dispatch_timeout_ms: Option<u64>,
     console_log_enabled: Option<bool>,
+    debug_enabled: Option<bool>,
     console_title: Option<String>,
 }
 
@@ -58,6 +61,12 @@ impl RuntimeConfig {
             .unwrap_or_else(|| "127.0.0.1".to_owned());
         let port = json_config.server.port.unwrap_or(18765);
         let allow_remote = !is_loopback_host(host.as_str());
+        let debug_enabled = json_config.runtime.debug_enabled.unwrap_or(false);
+        let debug_log_path = if debug_enabled {
+            resolve_log_path(plugin_base_dir().or_else(executable_base_dir))
+        } else {
+            None
+        };
 
         Self {
             host: host.clone(),
@@ -75,6 +84,8 @@ impl RuntimeConfig {
                 .filter(|value| *value > 0)
                 .unwrap_or(5_000),
             console_log_enabled: json_config.runtime.console_log_enabled.unwrap_or(true),
+            debug_enabled,
+            debug_log_path,
             console_title: json_config
                 .runtime
                 .console_title
@@ -115,6 +126,10 @@ fn resolve_json_config_path() -> Option<PathBuf> {
     ];
 
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn resolve_log_path(base_dir: Option<PathBuf>) -> Option<PathBuf> {
+    base_dir.map(|dir| dir.join("ce_plugin.debug.log"))
 }
 
 fn format_bind_addr(host: &str, port: u16) -> String {

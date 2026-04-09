@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use super::{lua_client, process, util, ToolResponse};
+use super::{memory, process, util, ToolResponse};
 use crate::domain::fingerprint::ModuleFingerprint;
 
 const METHODS: &[&str] = &["get_module_fingerprint"];
 const PE_HEADER_READ_SIZE: usize = 0x1000;
 const MAX_PE_HEADER_READ_SIZE: usize = 0x10000;
 const IMAGE_DIRECTORY_ENTRY_IMPORT: usize = 1;
-const LUA_MEMORY_CHUNK_SIZE: usize = 0x10000;
+const CE_MEMORY_CHUNK_SIZE: usize = 0x10000;
 
 pub fn dispatch(method: &str, params_json: &str) -> Option<ToolResponse> {
     let response = match method {
@@ -90,7 +90,7 @@ fn get_module_fingerprint(params_json: &str) -> ToolResponse {
             "fingerprint": fingerprint,
             "path": module.path,
             "resolved_module_name": module.name,
-            "header_reader": if header.is_some() { "lua_read_memory" } else { "module_enumeration_fallback" },
+            "header_reader": if header.is_some() { "ce_read_memory" } else { "module_enumeration_fallback" },
         })
         .to_string(),
     }
@@ -133,17 +133,23 @@ fn read_module_pe_metadata(module_base: usize) -> Result<PeMetadata, String> {
     parse_pe_metadata(&bytes)
 }
 
-fn call_lua_json_tool(method: &str, params: Value) -> Result<Value, String> {
-    lua_client::call_tool_json_string_err(method, &params)
+fn call_ce_json_tool(method: &str, params: Value) -> Result<Value, String> {
+    let response = memory::dispatch(method, &params.to_string())
+        .ok_or_else(|| format!("unsupported CE memory tool: {}", method))?;
+    if !response.success {
+        return Err(response.body_json);
+    }
+    serde_json::from_str::<Value>(&response.body_json)
+        .map_err(|error| format!("CE memory tool returned invalid json: {}", error))
 }
 
 fn read_memory_exact(address: usize, size: usize) -> Result<Vec<u8>, String> {
-    let mut output = Vec::with_capacity(size.min(LUA_MEMORY_CHUNK_SIZE));
+    let mut output = Vec::with_capacity(size.min(CE_MEMORY_CHUNK_SIZE));
     let mut cursor = address;
     let mut remaining = size;
 
     while remaining > 0 {
-        let request_size = remaining.min(LUA_MEMORY_CHUNK_SIZE);
+        let request_size = remaining.min(CE_MEMORY_CHUNK_SIZE);
         let chunk = read_memory_chunk(cursor, request_size)?;
         output.extend_from_slice(&chunk);
         remaining -= chunk.len();
@@ -158,7 +164,7 @@ fn read_memory_chunk(address: usize, size: usize) -> Result<Vec<u8>, String> {
         return Ok(Vec::new());
     }
 
-    let body = call_lua_json_tool(
+    let body = call_ce_json_tool(
         "read_memory",
         json!({
             "address": util::format_address(address),
@@ -168,20 +174,20 @@ fn read_memory_chunk(address: usize, size: usize) -> Result<Vec<u8>, String> {
     let bytes = body
         .get("bytes")
         .and_then(Value::as_array)
-        .ok_or_else(|| "lua read_memory response missing bytes array".to_owned())?;
+        .ok_or_else(|| "CE read_memory response missing bytes array".to_owned())?;
 
     let mut output = Vec::with_capacity(bytes.len());
     for value in bytes {
         let byte = value
             .as_u64()
             .and_then(|number| u8::try_from(number).ok())
-            .ok_or_else(|| "lua read_memory bytes array contained non-byte value".to_owned())?;
+            .ok_or_else(|| "CE read_memory bytes array contained non-byte value".to_owned())?;
         output.push(byte);
     }
 
     if output.len() != size {
         return Err(format!(
-            "short lua read at {}: expected {} bytes, got {}",
+            "short CE read at {}: expected {} bytes, got {}",
             util::format_address(address),
             size,
             output.len()
@@ -327,7 +333,7 @@ fn compute_section_hashes(module_base: usize, metadata: &PeMetadata) -> BTreeMap
         let mut failed = false;
 
         while remaining > 0 {
-            let request_size = remaining.min(LUA_MEMORY_CHUNK_SIZE);
+            let request_size = remaining.min(CE_MEMORY_CHUNK_SIZE);
             match read_memory_chunk(cursor, request_size) {
                 Ok(chunk) => {
                     digest.consume(&chunk);

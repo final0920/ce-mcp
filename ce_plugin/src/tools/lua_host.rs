@@ -93,12 +93,31 @@ pub(crate) fn execute_snippet(code: &str, structured: bool) -> Result<Value, Str
     with_lua_runtime(|host| host.execute_snippet(code, structured))
 }
 
+pub(crate) fn execute_snippet_result(code: &str) -> Result<Value, String> {
+    extract_first_structured_result(execute_snippet(code, true)?)
+}
+
+pub(crate) fn execute_snippet_string_result(code: &str) -> Result<String, String> {
+    coerce_result_to_string(execute_snippet_result(code)?)
+}
+
 pub(crate) fn call_global(
     function_name: &str,
     args: &[&str],
     structured: bool,
 ) -> Result<Value, String> {
     with_lua_runtime(|host| host.call_global(function_name, args, structured))
+}
+
+pub(crate) fn call_global_result(function_name: &str, args: &[&str]) -> Result<Value, String> {
+    extract_first_structured_result(call_global(function_name, args, true)?)
+}
+
+pub(crate) fn call_global_string_result(
+    function_name: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    coerce_result_to_string(call_global_result(function_name, args)?)
 }
 
 #[allow(dead_code)]
@@ -131,54 +150,54 @@ where
 {
     let app = runtime::app_state().ok_or_else(|| "plugin runtime unavailable".to_owned())?;
     console::info(format!(
-        "[script] step=runtime_begin dispatcher_mode={} lua_state_export_available={}",
+        "脚本桥接启动: dispatcher_mode={} lua_state_export_available={}",
         app.dispatcher_mode(),
         app.lua_state_export_available()
     ));
     if app.dispatcher_mode() != "window-message-hook" {
-        return Err("script execution requires window-message-hook dispatcher mode".to_owned());
+        return Err("脚本执行要求 dispatcher_mode=window-message-hook".to_owned());
     }
 
-    console::info("[script] step=get_lua_state_export_begin");
+    console::info("脚本桥接: 开始获取 CE 的 get_lua_state 导出");
     let get_lua_state = app
         .exported_functions()
         .get_lua_state
-        .ok_or_else(|| "CE get_lua_state export unavailable".to_owned())?;
+        .ok_or_else(|| "CE 未暴露 get_lua_state 导出".to_owned())?;
     console::info(format!(
-        "[script] step=get_lua_state_export_end fn_ptr={:p}",
+        "脚本桥接: 已获取 get_lua_state 导出，函数地址={:p}",
         get_lua_state as *const ()
     ));
 
-    console::info("[script] step=get_lua_state_call_begin");
+    console::info("脚本桥接: 开始调用 get_lua_state");
     let state = unsafe { get_lua_state() }.cast::<LuaState>();
     console::info(format!(
-        "[script] step=get_lua_state_call_end state_ptr={:p}",
+        "脚本桥接: 已获取 Lua 状态指针，state={:p}",
         state
     ));
     if state.is_null() {
-        return Err("CE returned null lua state".to_owned());
+        return Err("CE 返回了空的 Lua 状态指针".to_owned());
     }
 
     let state_addr = state as usize;
     if state_addr == usize::MAX || state_addr == 0xFFFF_FFFF || state_addr < 0x10000 {
         console::error(format!(
-            "[script] step=get_lua_state_invalid state_ptr={:p}",
+            "脚本桥接: Lua 状态指针异常，state={:p}",
             state
         ));
         return Err(format!(
-            "CE returned invalid lua state pointer: {:p}",
+            "CE 返回了无效的 Lua 状态指针: {:p}",
             state
         ));
     }
 
-    console::info("[script] step=resolve_lua_api_begin");
+    console::info("脚本桥接: 开始解析 Lua API 导出");
     let lua = resolve_lua_api()?;
     console::info(format!(
-        "[script] step=resolve_lua_api_end lua_module={}",
+        "脚本桥接: Lua API 解析完成，模块={}",
         lua.module_name
     ));
     console::info(format!(
-        "[script] step=runtime_ready lua_module={} state_ptr={:p}",
+        "脚本桥接已就绪: lua_module={} state={:p}",
         lua.module_name, state
     ));
     callback(LuaHost { state, lua })
@@ -191,10 +210,10 @@ fn execute_lua_code(
     structured: bool,
 ) -> Result<Value, String> {
     let guard = StackGuard::new(state, lua);
-    let code = CString::new(code).map_err(|_| "lua code contains interior null byte".to_owned())?;
+    let code = CString::new(code).map_err(|_| "Lua 代码中包含非法空字符".to_owned())?;
 
     console::info(format!(
-        "[script] step=load_begin kind=snippet structured={} code_len={} base_top={}",
+        "脚本执行: 开始加载代码片段 structured={} code_len={} base_top={}",
         structured,
         code.as_bytes().len(),
         guard.top
@@ -203,25 +222,25 @@ fn execute_lua_code(
     if status != LUA_OK {
         let error = lua_error_string(state, lua);
         console::error(format!(
-            "[script] step=load_error kind=snippet error={}",
+            "脚本执行: 加载代码片段失败 error={}",
             error
         ));
-        return Err(format!("Compile error: {}", error));
+        return Err(format!("编译错误: {}", error));
     }
-    console::info("[script] step=load_end kind=snippet success=true");
+    console::info("脚本执行: 代码片段加载成功");
 
-    console::info("[script] step=pcall_begin kind=snippet argc=0");
+    console::info("脚本执行: 开始执行代码片段 argc=0");
     let status = unsafe { (lua.lua_pcallk)(state, 0, LUA_MULTRET, 0, 0, None) };
     if status != LUA_OK {
         let error = lua_error_string(state, lua);
         console::error(format!(
-            "[script] step=pcall_error kind=snippet error={}",
+            "脚本执行: 代码片段运行失败 error={}",
             error
         ));
-        return Err(format!("Runtime error: {}", error));
+        return Err(format!("运行时错误: {}", error));
     }
     console::info(format!(
-        "[script] step=pcall_end kind=snippet top_after={}",
+        "脚本执行: 代码片段执行完成 top_after={}",
         unsafe { (lua.lua_gettop)(state) }
     ));
 
@@ -237,10 +256,10 @@ fn execute_lua_global(
 ) -> Result<Value, String> {
     let guard = StackGuard::new(state, lua);
     let function_name = CString::new(function_name)
-        .map_err(|_| "lua function name contains interior null byte".to_owned())?;
+        .map_err(|_| "Lua 函数名中包含非法空字符".to_owned())?;
 
     console::info(format!(
-        "[script] step=getglobal_begin function={} argc={} structured={} base_top={}",
+        "脚本桥接: 开始调用全局函数 function={} argc={} structured={} base_top={}",
         function_name.to_string_lossy(),
         args.len(),
         structured,
@@ -251,27 +270,27 @@ fn execute_lua_global(
     }
     if unsafe { (lua.lua_type)(state, -1) } != LUA_TFUNCTION {
         let error = format!(
-            "CE Lua global {} is unavailable",
+            "CE Lua 全局函数 {} 不可用",
             function_name.to_string_lossy()
         );
-        console::error(format!("[script] step=getglobal_error error={}", error));
+        console::error(format!("脚本桥接: 全局函数不可用 error={}", error));
         return Err(error);
     }
     console::info(format!(
-        "[script] step=getglobal_end function={} success=true",
+        "脚本桥接: 全局函数已找到 function={}",
         function_name.to_string_lossy()
     ));
 
     for arg in args {
         let arg = CString::new(*arg)
-            .map_err(|_| "lua argument contains interior null byte".to_owned())?;
+            .map_err(|_| "Lua 参数中包含非法空字符".to_owned())?;
         unsafe {
             (lua.lua_pushlstring)(state, arg.as_ptr(), arg.as_bytes().len());
         }
     }
 
     console::info(format!(
-        "[script] step=pcall_begin kind=global function={} argc={}",
+        "脚本执行: 开始调用全局函数 function={} argc={}",
         function_name.to_string_lossy(),
         args.len()
     ));
@@ -279,14 +298,14 @@ fn execute_lua_global(
     if status != LUA_OK {
         let error = lua_error_string(state, lua);
         console::error(format!(
-            "[script] step=pcall_error kind=global function={} error={}",
+            "脚本执行: 全局函数运行失败 function={} error={}",
             function_name.to_string_lossy(),
             error
         ));
-        return Err(format!("Runtime error: {}", error));
+        return Err(format!("运行时错误: {}", error));
     }
     console::info(format!(
-        "[script] step=pcall_end kind=global function={} top_after={}",
+        "脚本执行: 全局函数执行完成 function={} top_after={}",
         function_name.to_string_lossy(),
         unsafe { (lua.lua_gettop)(state) }
     ));
@@ -294,6 +313,39 @@ fn execute_lua_global(
     collect_lua_results(state, lua, guard.top, structured)
 }
 
+fn extract_first_structured_result(response: Value) -> Result<Value, String> {
+    if let Some(value) = response
+        .get("structured_result")
+        .filter(|value| !value.is_null())
+        .cloned()
+    {
+        return Ok(value);
+    }
+
+    if let Some(value) = response
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+        .cloned()
+    {
+        return Ok(value);
+    }
+
+    if let Some(value) = response.get("result").cloned() {
+        return Ok(value);
+    }
+
+    Err("lua response missing result".to_owned())
+}
+
+fn coerce_result_to_string(value: Value) -> Result<String, String> {
+    match value {
+        Value::String(text) => Ok(text),
+        Value::Null => Ok("nil".to_owned()),
+        other => serde_json::to_string(&other)
+            .map_err(|error| format!("failed to stringify lua result: {}", error)),
+    }
+}
 fn collect_lua_results(
     state: *mut LuaState,
     lua: &LuaApi,
@@ -358,10 +410,10 @@ fn execute_auto_assemble_inner(
     let guard = StackGuard::new(state, lua);
     let auto_assemble = CString::new("autoAssemble").expect("static string");
     let script =
-        CString::new(script).map_err(|_| "script contains interior null byte".to_owned())?;
+        CString::new(script).map_err(|_| "脚本内容中包含非法空字符".to_owned())?;
 
     console::info(format!(
-        "[script] step=getglobal_begin function=autoAssemble argc=1 base_top={}",
+        "脚本桥接: 开始调用 autoAssemble base_top={}",
         guard.top
     ));
     unsafe {
@@ -369,24 +421,24 @@ fn execute_auto_assemble_inner(
     }
     if unsafe { (lua.lua_type)(state, -1) } != LUA_TFUNCTION {
         console::error(
-            "[script] step=getglobal_error error=CE Lua global autoAssemble is unavailable",
+            "脚本桥接: CE 全局函数 autoAssemble 不可用",
         );
-        return Err("CE Lua global autoAssemble is unavailable".to_owned());
+        return Err("CE Lua 全局函数 autoAssemble 不可用".to_owned());
     }
 
     unsafe {
         (lua.lua_pushlstring)(state, script.as_ptr(), script.as_bytes().len());
     }
 
-    console::info("[script] step=pcall_begin kind=auto_assemble argc=1");
+    console::info("脚本执行: 开始调用 autoAssemble argc=1");
     let status = unsafe { (lua.lua_pcallk)(state, 1, LUA_MULTRET, 0, 0, None) };
     if status != LUA_OK {
         let error = lua_error_string(state, lua);
         console::error(format!(
-            "[script] step=pcall_error kind=auto_assemble error={}",
+            "脚本执行: autoAssemble 运行失败 error={}",
             error
         ));
-        return Err(format!("AutoAssemble failed: {}", error));
+        return Err(format!("Auto Assembler 执行失败: {}", error));
     }
 
     let top = unsafe { (lua.lua_gettop)(state) };
@@ -405,10 +457,10 @@ fn execute_auto_assemble_inner(
             "unknown failure".to_owned()
         };
         console::error(format!(
-            "[script] step=auto_assemble_failed detail={}",
+            "脚本执行: autoAssemble 执行失败 detail={}",
             detail
         ));
-        return Err(format!("AutoAssemble failed: {}", detail));
+        return Err(format!("Auto Assembler 执行失败: {}", detail));
     }
 
     let mut response = json!({
@@ -430,7 +482,7 @@ fn execute_auto_assemble_inner(
     }
 
     console::info(format!(
-        "[script] step=pcall_end kind=auto_assemble top_after={} executed=true",
+        "脚本执行: autoAssemble 执行完成 top_after={} executed=true",
         top
     ));
     Ok(response)

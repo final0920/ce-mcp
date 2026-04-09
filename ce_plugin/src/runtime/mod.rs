@@ -44,20 +44,28 @@ pub fn init_runtime(plugin_id: i32, exported_functions: *const ExportedFunctions
     }
 
     let config = RuntimeConfig::load();
-    console::initialize(config.console_log_enabled, config.console_title.as_str());
+    console::initialize(
+        config.console_log_enabled,
+        config.console_title.as_str(),
+        config.debug_log_path.as_deref(),
+    );
     if let Err(error) = config.validate_startup_policy() {
         console::error(format!("启动策略校验失败: {}", error));
         return;
     }
     console::info(format!(
-        "插件启动中: version={} plugin_id={} 监听地址={} allow_remote={} auth_enabled={} 超时={}ms",
+        "插件启动中: version={} plugin_id={} 监听地址={} allow_remote={} auth_enabled={} 调试日志={} 超时={}ms",
         build_version(),
         plugin_id,
         config.bind_addr,
         config.allow_remote,
         config.auth_enabled,
+        config.debug_enabled,
         config.dispatch_timeout_ms
     ));
+    if let Some(path) = config.debug_log_path.as_ref() {
+        console::info(format!("调试日志文件: {}", path.display()));
+    }
     let dispatcher = MainThreadDispatcher::new();
     let server = StreamableHttpServer::new(
         config.bind_addr.clone(),
@@ -103,6 +111,17 @@ pub fn shutdown_runtime() {
         console::info("插件运行时正在关闭");
         if let Err(error) = app.stop_http_server() {
             console::error(format!("HTTP 服务停止失败: {}", error));
+        }
+        let cleanup_response = if app.dispatcher_available() {
+            app.dispatch_tool("__ce_mcp_cleanup_runtime_state", "{}")
+        } else {
+            crate::tools::cleanup_ce_runtime_state()
+        };
+        if !cleanup_response.success {
+            console::warn(format!(
+                "CE 运行时状态清理失败: {}",
+                cleanup_response.body_json
+            ));
         }
         if let Err(error) = app.stop_dispatcher() {
             console::error(format!("调度器停止失败: {}", error));
