@@ -445,7 +445,10 @@ fn call_ce_tool_json(method: &str, params_json: &str) -> Result<Value, ToolRespo
         "get_memory_regions" => ce_get_memory_regions(&params),
         "enum_memory_regions_full" => ce_enum_memory_regions_full(&params),
         "checksum_memory" => ce_checksum_memory(&params),
-        other => Err(error_response(format!("unsupported CE scan tool: {}", other))),
+        other => Err(error_response(format!(
+            "unsupported CE scan tool: {}",
+            other
+        ))),
     }
 }
 
@@ -454,7 +457,10 @@ fn ce_scan_all(params: &Value) -> Result<Value, ToolResponse> {
         .get("value")
         .ok_or_else(|| error_response("missing value".to_owned()))?;
     let value_lua = util::lua_scalar_literal(value).map_err(error_response)?;
-    let value_type = params.get("type").and_then(Value::as_str).unwrap_or("dword");
+    let value_type = params
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("dword");
     let value_type_lua = util::lua_string_literal(value_type);
     let protection = util::lua_string_literal(
         params
@@ -518,7 +524,10 @@ return {{ success = true, results = results, total = fl.getCount(), returned = c
 }
 
 fn ce_next_scan(params: &Value) -> Result<Value, ToolResponse> {
-    let scan_type = params.get("scan_type").and_then(Value::as_str).unwrap_or("exact");
+    let scan_type = params
+        .get("scan_type")
+        .and_then(Value::as_str)
+        .unwrap_or("exact");
     let scan_type_lua = util::lua_string_literal(scan_type);
     let value_lua = match params.get("value") {
         Some(value) => util::lua_scalar_literal(value).map_err(error_response)?,
@@ -555,8 +564,14 @@ return {{ success = true, count = fl.getCount() }}
 }
 
 fn ce_aob_scan(params: &Value) -> Result<Value, ToolResponse> {
-    let pattern = util::lua_string_literal(params.get("pattern").and_then(Value::as_str).unwrap_or(""));
-    let protection = util::lua_string_literal(params.get("protection").and_then(Value::as_str).unwrap_or("+X"));
+    let pattern =
+        util::lua_string_literal(params.get("pattern").and_then(Value::as_str).unwrap_or(""));
+    let protection = util::lua_string_literal(
+        params
+            .get("protection")
+            .and_then(Value::as_str)
+            .unwrap_or("+X"),
+    );
     let limit = params
         .get("limit")
         .and_then(Value::as_u64)
@@ -589,7 +604,11 @@ fn ce_search_string(params: &Value) -> Result<Value, ToolResponse> {
         .and_then(Value::as_str)
         .unwrap_or("");
     let search_lua = util::lua_string_literal(search_text);
-    let wide = params.get("wide").and_then(Value::as_bool).unwrap_or(false).to_string();
+    let wide = params
+        .get("wide")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .to_string();
     let limit = params
         .get("limit")
         .and_then(Value::as_u64)

@@ -170,24 +170,15 @@ where
 
     console::info("脚本桥接: 开始调用 get_lua_state");
     let state = unsafe { get_lua_state() }.cast::<LuaState>();
-    console::info(format!(
-        "脚本桥接: 已获取 Lua 状态指针，state={:p}",
-        state
-    ));
+    console::info(format!("脚本桥接: 已获取 Lua 状态指针，state={:p}", state));
     if state.is_null() {
         return Err("CE 返回了空的 Lua 状态指针".to_owned());
     }
 
     let state_addr = state as usize;
     if state_addr == usize::MAX || state_addr == 0xFFFF_FFFF || state_addr < 0x10000 {
-        console::error(format!(
-            "脚本桥接: Lua 状态指针异常，state={:p}",
-            state
-        ));
-        return Err(format!(
-            "CE 返回了无效的 Lua 状态指针: {:p}",
-            state
-        ));
+        console::error(format!("脚本桥接: Lua 状态指针异常，state={:p}", state));
+        return Err(format!("CE 返回了无效的 Lua 状态指针: {:p}", state));
     }
 
     console::info("脚本桥接: 开始解析 Lua API 导出");
@@ -221,10 +212,7 @@ fn execute_lua_code(
     let status = unsafe { (lua.lua_l_loadstring)(state, code.as_ptr()) };
     if status != LUA_OK {
         let error = lua_error_string(state, lua);
-        console::error(format!(
-            "脚本执行: 加载代码片段失败 error={}",
-            error
-        ));
+        console::error(format!("脚本执行: 加载代码片段失败 error={}", error));
         return Err(format!("编译错误: {}", error));
     }
     console::info("脚本执行: 代码片段加载成功");
@@ -233,10 +221,7 @@ fn execute_lua_code(
     let status = unsafe { (lua.lua_pcallk)(state, 0, LUA_MULTRET, 0, 0, None) };
     if status != LUA_OK {
         let error = lua_error_string(state, lua);
-        console::error(format!(
-            "脚本执行: 代码片段运行失败 error={}",
-            error
-        ));
+        console::error(format!("脚本执行: 代码片段运行失败 error={}", error));
         return Err(format!("运行时错误: {}", error));
     }
     console::info(format!(
@@ -255,8 +240,8 @@ fn execute_lua_global(
     structured: bool,
 ) -> Result<Value, String> {
     let guard = StackGuard::new(state, lua);
-    let function_name = CString::new(function_name)
-        .map_err(|_| "Lua 函数名中包含非法空字符".to_owned())?;
+    let function_name =
+        CString::new(function_name).map_err(|_| "Lua 函数名中包含非法空字符".to_owned())?;
 
     console::info(format!(
         "脚本桥接: 开始调用全局函数 function={} argc={} structured={} base_top={}",
@@ -269,10 +254,7 @@ fn execute_lua_global(
         (lua.lua_getglobal)(state, function_name.as_ptr());
     }
     if unsafe { (lua.lua_type)(state, -1) } != LUA_TFUNCTION {
-        let error = format!(
-            "CE Lua 全局函数 {} 不可用",
-            function_name.to_string_lossy()
-        );
+        let error = format!("CE Lua 全局函数 {} 不可用", function_name.to_string_lossy());
         console::error(format!("脚本桥接: 全局函数不可用 error={}", error));
         return Err(error);
     }
@@ -282,8 +264,7 @@ fn execute_lua_global(
     ));
 
     for arg in args {
-        let arg = CString::new(*arg)
-            .map_err(|_| "Lua 参数中包含非法空字符".to_owned())?;
+        let arg = CString::new(*arg).map_err(|_| "Lua 参数中包含非法空字符".to_owned())?;
         unsafe {
             (lua.lua_pushlstring)(state, arg.as_ptr(), arg.as_bytes().len());
         }
@@ -409,8 +390,7 @@ fn execute_auto_assemble_inner(
 ) -> Result<Value, String> {
     let guard = StackGuard::new(state, lua);
     let auto_assemble = CString::new("autoAssemble").expect("static string");
-    let script =
-        CString::new(script).map_err(|_| "脚本内容中包含非法空字符".to_owned())?;
+    let script = CString::new(script).map_err(|_| "脚本内容中包含非法空字符".to_owned())?;
 
     console::info(format!(
         "脚本桥接: 开始调用 autoAssemble base_top={}",
@@ -420,9 +400,7 @@ fn execute_auto_assemble_inner(
         (lua.lua_getglobal)(state, auto_assemble.as_ptr());
     }
     if unsafe { (lua.lua_type)(state, -1) } != LUA_TFUNCTION {
-        console::error(
-            "脚本桥接: CE 全局函数 autoAssemble 不可用",
-        );
+        console::error("脚本桥接: CE 全局函数 autoAssemble 不可用");
         return Err("CE Lua 全局函数 autoAssemble 不可用".to_owned());
     }
 
@@ -434,10 +412,7 @@ fn execute_auto_assemble_inner(
     let status = unsafe { (lua.lua_pcallk)(state, 1, LUA_MULTRET, 0, 0, None) };
     if status != LUA_OK {
         let error = lua_error_string(state, lua);
-        console::error(format!(
-            "脚本执行: autoAssemble 运行失败 error={}",
-            error
-        ));
+        console::error(format!("脚本执行: autoAssemble 运行失败 error={}", error));
         return Err(format!("Auto Assembler 执行失败: {}", error));
     }
 
@@ -456,10 +431,7 @@ fn execute_auto_assemble_inner(
         } else {
             "unknown failure".to_owned()
         };
-        console::error(format!(
-            "脚本执行: autoAssemble 执行失败 detail={}",
-            detail
-        ));
+        console::error(format!("脚本执行: autoAssemble 执行失败 detail={}", detail));
         return Err(format!("Auto Assembler 执行失败: {}", detail));
     }
 

@@ -13,10 +13,13 @@ use crate::runtime::console;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_DEFAULT_BODY_BYTES: usize = 32 * 1024;
 const MAX_MCP_BODY_BYTES: usize = 256 * 1024;
+const DISCOVERY_PROBE_HEADER_NAME: &str = "x-ce-mcp-discovery";
+const DISCOVERY_PROBE_HEADER_VALUE: &str = "1";
 
 #[derive(Debug)]
 pub struct StreamableHttpServer {
-    bind_addr: String,
+    requested_bind_addr: String,
+    resolved_bind_addr: Option<String>,
     allow_remote: bool,
     auth_enabled: bool,
     auth_token: Option<String>,
@@ -27,13 +30,14 @@ pub struct StreamableHttpServer {
 
 impl StreamableHttpServer {
     pub fn new(
-        bind_addr: String,
+        requested_bind_addr: String,
         allow_remote: bool,
         auth_enabled: bool,
         auth_token: Option<String>,
     ) -> Self {
         Self {
-            bind_addr,
+            requested_bind_addr,
+            resolved_bind_addr: None,
             allow_remote,
             auth_enabled,
             auth_token,
@@ -43,29 +47,40 @@ impl StreamableHttpServer {
         }
     }
 
-    pub fn start(&mut self, plugin_id: i32) -> Result<(), String> {
+    pub fn start(&mut self, plugin_id: i32) -> Result<String, String> {
         if self.running {
-            return Ok(());
+            return Ok(self
+                .resolved_bind_addr
+                .clone()
+                .unwrap_or_else(|| self.requested_bind_addr.clone()));
         }
 
-        let listener = TcpListener::bind(&self.bind_addr)
-            .map_err(|error| format!("http bind failed on {}: {}", self.bind_addr, error))?;
+        let listener = TcpListener::bind(&self.requested_bind_addr).map_err(|error| {
+            format!(
+                "http bind failed on {}: {}",
+                self.requested_bind_addr, error
+            )
+        })?;
+        let bind_addr = listener
+            .local_addr()
+            .map_err(|error| format!("failed to resolve local bind address: {}", error))?
+            .to_string();
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("failed to set nonblocking listener: {}", error))?;
 
-        let bind_addr = self.bind_addr.clone();
         let allow_remote = self.allow_remote;
         let auth_enabled = self.auth_enabled;
         let auth_token = self.auth_token.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop_flag);
 
+        let worker_bind_addr = bind_addr.clone();
         let worker = thread::Builder::new()
             .name("ce_plugin_http".to_owned())
             .spawn(move || {
-                let _bootstrap_payload = mcp::bootstrap(plugin_id, &bind_addr);
-                console::info(format!("HTTP 工作线程已启动: {}", bind_addr));
+                let _bootstrap_payload = mcp::bootstrap(plugin_id, &worker_bind_addr);
+                console::info(format!("HTTP 工作线程已启动: {}", worker_bind_addr));
                 while !worker_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, peer)) => {
@@ -73,7 +88,7 @@ impl StreamableHttpServer {
                                 &mut stream,
                                 peer,
                                 plugin_id,
-                                &bind_addr,
+                                &worker_bind_addr,
                                 allow_remote,
                                 auth_enabled,
                                 auth_token.as_deref(),
@@ -99,8 +114,9 @@ impl StreamableHttpServer {
 
         self.stop_flag = Some(stop_flag);
         self.worker = Some(worker);
+        self.resolved_bind_addr = Some(bind_addr.clone());
         self.running = true;
-        Ok(())
+        Ok(bind_addr)
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
@@ -113,6 +129,7 @@ impl StreamableHttpServer {
         }
 
         self.stop_flag = None;
+        self.resolved_bind_addr = None;
         self.running = false;
         Ok(())
     }
@@ -155,10 +172,13 @@ fn handle_connection(
             return write_http_json_response(stream, error.status(), &error.body_json());
         }
     };
-    console::info(format!(
-        "收到请求: {} {} 来自 {}",
-        request.method, request.path, peer
-    ));
+    let is_internal_discovery_probe = is_discovery_probe(&request);
+    if !is_internal_discovery_probe {
+        console::info(format!(
+            "收到请求: {} {} 来自 {}",
+            request.method, request.path, peer
+        ));
+    }
 
     if request.path == "/mcp" && !is_origin_allowed(request.headers.get("origin")) {
         console::warn(format!("已拒绝非法 Origin: {}", peer));
@@ -215,10 +235,12 @@ fn handle_connection(
         )
     };
 
-    console::info(format!(
-        "请求完成: {} {} -> {}",
-        request.method, request.path, status
-    ));
+    if !is_internal_discovery_probe {
+        console::info(format!(
+            "请求完成: {} {} -> {}",
+            request.method, request.path, status
+        ));
+    }
 
     write_http_json_response(stream, status, &body)
 }
@@ -416,6 +438,16 @@ fn is_origin_allowed(origin: Option<&String>) -> bool {
         host.as_deref(),
         Some("localhost") | Some("127.0.0.1") | Some("::1")
     )
+}
+
+fn is_discovery_probe(request: &HttpRequest) -> bool {
+    request.method == "GET"
+        && request.path == "/health"
+        && request
+            .headers
+            .get(DISCOVERY_PROBE_HEADER_NAME)
+            .map(|value| value.trim() == DISCOVERY_PROBE_HEADER_VALUE)
+            .unwrap_or(false)
 }
 
 fn parse_origin_host(origin: &str) -> Option<String> {

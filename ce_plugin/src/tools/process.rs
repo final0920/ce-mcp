@@ -1,4 +1,4 @@
-﻿use serde_json::{json, Value};
+use serde_json::{json, Value};
 
 use super::{addressing, lua_host, util, ToolResponse};
 use crate::runtime;
@@ -59,15 +59,19 @@ fn ping() -> ToolResponse {
     let details = runtime::app_state()
         .map(|app| {
             format!(
-                "\"plugin_id\":{},\"bind_addr\":\"{}\",\"server_name\":\"{}\",\"server_version\":\"{}\"",
+                "\"instance_id\":\"{}\",\"ce_pid\":{},\"target_pid\":{},\"plugin_id\":{},\"bind_addr\":\"{}\",\"requested_bind_addr\":\"{}\",\"server_name\":\"{}\",\"server_version\":\"{}\"",
+                util::escape_json(app.instance_id()),
+                app.ce_process_id(),
+                app.target_process_id(),
                 app.plugin_id(),
-                util::escape_json(app.config().bind_addr.as_str()),
+                util::escape_json(app.bind_addr().as_str()),
+                util::escape_json(app.requested_bind_addr()),
                 util::escape_json(app.config().server_name.as_str()),
                 util::escape_json(app.config().server_version.as_str())
             )
         })
         .unwrap_or_else(|| {
-            "\"plugin_id\":-1,\"bind_addr\":\"unknown\",\"server_name\":\"cheatengine-ce-plugin\",\"server_version\":\"unknown\""
+            "\"instance_id\":\"unknown\",\"ce_pid\":0,\"target_pid\":0,\"plugin_id\":-1,\"bind_addr\":\"unknown\",\"requested_bind_addr\":\"unknown\",\"server_name\":\"cheatengine-ce-plugin\",\"server_version\":\"unknown\""
                 .to_owned()
         });
 
@@ -93,7 +97,10 @@ fn call_ce_json_tool(method: &str, params: &Value) -> Result<Value, ToolResponse
         "get_symbol_address" => ce_get_symbol_address(params),
         "get_address_info" => ce_get_address_info(params),
         "get_rtti_classname" => ce_get_rtti_classname(params),
-        other => Err(error_response(format!("unsupported CE process tool: {}", other))),
+        other => Err(error_response(format!(
+            "unsupported CE process tool: {}",
+            other
+        ))),
     }
 }
 

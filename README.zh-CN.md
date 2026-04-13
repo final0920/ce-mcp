@@ -85,8 +85,8 @@ ce_plugin/target/release/ce_plugin.dll
 
 ### 3. 连接 MCP 客户端
 
-- 健康检查：`GET http://127.0.0.1:18765/health`
-- MCP 入口：`POST http://127.0.0.1:18765/mcp`
+- 单实例固定端口模式：显式配置 `server.port=18765` 后，可直接访问 `GET http://127.0.0.1:18765/health` 与 `POST http://127.0.0.1:18765/mcp`
+- 多实例推荐模式：配置 `server.port=0`，让插件自动分配空闲端口，再从本地 discovery registry 读取实际 `bind_addr`
 
 不同 MCP 客户端的配置格式不同，但前提都是该客户端支持 HTTP 或 Streamable HTTP transport。
 
@@ -97,6 +97,8 @@ ce_plugin/target/release/ce_plugin.dll
 - `script_runtime_ready = true` 表示脚本敏感工具以及依赖后端 bootstrap 的 CE 路径已经可用。
 - 若安装 hook 失败，插件可能回退为 `serialized-worker`。
 - 回退模式属于降级兼容路径，不应再视为已迁移 CE-first 工具的长期首选后端。
+- `/health` 与 `ping` 会返回 `instance_id / ce_pid / target_pid / bind_addr / requested_bind_addr`，用于多实例路由与排障。
+- 当 `runtime.debug_enabled=true` 时，调试日志会按实例写成 `ce_plugin.<ce_pid>.<instance_id[:8]>.debug.log`。
 
 ## 功能列表
 
@@ -106,7 +108,7 @@ ce_plugin/target/release/ce_plugin.dll
 
 用于建立分析上下文，先知道“目标是谁、代码在哪、线程怎么跑”。
 
-- `ping`: 健康检查，返回插件存活状态、调度模式与脚本运行状态。
+- `ping`: 健康检查，返回插件存活状态、实例标识、绑定地址、调度模式与脚本运行状态。
 - `get_process_info`: 获取当前附加进程的摘要信息、模块数量与架构。
 - `enum_modules`: 枚举目标进程已加载模块、基址、大小与路径。
 - `get_thread_list`: 枚举目标进程线程列表。
@@ -215,7 +217,7 @@ ce_plugin/target/release/ce_plugin.dll
 {
   "server": {
     "host": "127.0.0.1",
-    "port": 18765
+    "port": 0
   },
   "auth": {
     "enabled": false,
@@ -232,7 +234,19 @@ ce_plugin/target/release/ce_plugin.dll
 
 当监听 `0.0.0.0` 或公网地址时，必须启用 `auth.enabled=true` 且提供非空 Bearer Token。
 
-客户端接入以本 README 中说明的 MCP HTTP 入口（`/mcp`）和健康检查（`/health`）为准。当 `runtime.debug_enabled=true` 时，插件还会在 DLL 同级目录生成简体中文调试日志文件 `ce_plugin.debug.log`，便于排查问题。
+配置建议：
+
+- 单实例固定端口：设置 `server.port=18765` 或其他明确端口，客户端直接连接该地址。
+- 多实例自动端口：设置 `server.port=0`，让插件自动挑选空闲端口。
+
+本地 discovery registry：
+
+- 目录：`%LOCALAPPDATA%\ce-mcp\instances\`
+- 文件：每个活跃 CE 实例维护一个 `ce-<ce_pid>.json`
+- 内容：包含 `instance_id`、`ce_pid`、`target_pid`、`plugin_id`、`bind_addr`、`requested_bind_addr`、`dll_path`、`debug_log_path`、`server_version`、`last_heartbeat_unix_ms`
+- 生命周期：实例启动即注册，运行中持续心跳，正常退出时删除，启动期间会清扫 stale 记录
+
+客户端接入以本 README 中说明的 MCP HTTP 入口（`/mcp`）和健康检查（`/health`）为准。多实例客户端应先读取 discovery registry，再依据实例记录里的 `bind_addr` 连接对应插件。
 
 ## 项目结构
 

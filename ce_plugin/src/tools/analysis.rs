@@ -742,15 +742,21 @@ fn call_ce_tool_json(method: &str, params_json: &str) -> Result<Value, ToolRespo
         "find_references" => ce_find_references(&params),
         "find_call_references" => ce_find_call_references(&params),
         "dissect_structure" => ce_dissect_structure(&params),
-        other => Err(error_response(format!("unsupported CE analysis tool: {}", other))),
+        other => Err(error_response(format!(
+            "unsupported CE analysis tool: {}",
+            other
+        ))),
     }
 }
 
 fn ce_disassemble(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
     let count = params.get("count").and_then(Value::as_u64).unwrap_or(20);
-    let code = format!(r###"
+    let code = format!(
+        r###"
 {}
 local address = {}
 local count = {}
@@ -769,14 +775,19 @@ for i = 1, count do
     current = current + size
 end
 return {{ success = true, start_address = ce_mcp_to_hex(address), count = #instructions, instructions = instructions }}
-"###, LUA_TO_HEX_HELPER, address_lua, count);
+"###,
+        LUA_TO_HEX_HELPER, address_lua, count
+    );
     execute_ce_analysis_snippet(&code)
 }
 
 fn ce_get_instruction_info(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
-    let code = format!(r###"
+    let code = format!(
+        r###"
 {}
 local address = {}
 if type(address) == "string" then address = getAddressSafe(address) end
@@ -789,15 +800,23 @@ local bytes_hex = {{}}
 for _, byte in ipairs(bytes) do table.insert(bytes_hex, string.format("%02X", byte)) end
 local previous = getPreviousOpcode(address)
 return {{ success = true, address = ce_mcp_to_hex(address), instruction = text, size = size, bytes = table.concat(bytes_hex, " "), previous_instruction = previous and ce_mcp_to_hex(previous) or nil }}
-"###, LUA_TO_HEX_HELPER, address_lua);
+"###,
+        LUA_TO_HEX_HELPER, address_lua
+    );
     execute_ce_analysis_snippet(&code)
 }
 
 fn ce_find_function_boundaries(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
-    let max_search = params.get("max_search").and_then(Value::as_u64).unwrap_or(4096);
-    let code = format!(r###"
+    let max_search = params
+        .get("max_search")
+        .and_then(Value::as_u64)
+        .unwrap_or(4096);
+    let code = format!(
+        r###"
 {}
 local address = {}
 local max_search = {}
@@ -825,20 +844,31 @@ if function_start then
 end
 local found = function_start ~= nil
 return {{ success = true, found = found, query_address = ce_mcp_to_hex(address), function_start = function_start and ce_mcp_to_hex(function_start) or nil, function_end = function_end and ce_mcp_to_hex(function_end) or nil, function_size = (function_start and function_end) and (function_end - function_start + 1) or nil, prologue_type = prologue_type, arch = is64 and "x64" or "x86", note = (not found) and "No standard function prologue found within search range" or nil }}
-"###, LUA_TO_HEX_HELPER, address_lua, max_search);
+"###,
+        LUA_TO_HEX_HELPER, address_lua, max_search
+    );
     execute_ce_analysis_snippet(&code)
 }
 
 fn ce_analyze_function(params: &Value) -> Result<Value, ToolResponse> {
     let boundaries = ce_find_function_boundaries(params)?;
-    let function_start = boundaries.get("function_start").cloned().unwrap_or(Value::Null);
+    let function_start = boundaries
+        .get("function_start")
+        .cloned()
+        .unwrap_or(Value::Null);
     if function_start.is_null() {
-        return Ok(json!({"success": true, "query_address": params.get("address").cloned().unwrap_or(Value::Null), "calls": [], "arch": "x64", "note": "No standard function prologue found within search range"}));
+        return Ok(
+            json!({"success": true, "query_address": params.get("address").cloned().unwrap_or(Value::Null), "calls": [], "arch": "x64", "note": "No standard function prologue found within search range"}),
+        );
     }
-    let function_end = boundaries.get("function_end").cloned().unwrap_or(Value::Null);
+    let function_end = boundaries
+        .get("function_end")
+        .cloned()
+        .unwrap_or(Value::Null);
     let start_lua = util::lua_scalar_literal(&function_start).map_err(error_response)?;
     let end_lua = util::lua_scalar_literal(&function_end).map_err(error_response)?;
-    let code = format!(r###"
+    let code = format!(
+        r###"
 {}
 local function_start = {}
 local function_end = {}
@@ -856,15 +886,20 @@ while current and function_end and current <= function_end do
     current = current + size
 end
 return {{ success = true, query_address = ce_mcp_to_hex(function_start), function_start = ce_mcp_to_hex(function_start), function_end = function_end and ce_mcp_to_hex(function_end) or nil, calls = calls, arch = targetIs64Bit() and "x64" or "x86" }}
-"###, LUA_TO_HEX_HELPER, start_lua, end_lua);
+"###,
+        LUA_TO_HEX_HELPER, start_lua, end_lua
+    );
     execute_ce_analysis_snippet(&code)
 }
 
 fn ce_find_references(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50);
-    let code = format!(r###"
+    let code = format!(
+        r###"
 {}
 local target = {}
 local limit = {}
@@ -893,15 +928,21 @@ for i = 0, math.min(results.Count - 1, limit - 1) do
 end
 results.destroy()
 return {{ success = true, target = ce_mcp_to_hex(target), count = #refs, references = refs, arch = is64 and "x64" or "x86" }}
-"###, LUA_TO_HEX_HELPER, address_lua, limit);
+"###,
+        LUA_TO_HEX_HELPER, address_lua, limit
+    );
     execute_ce_analysis_snippet(&code)
 }
 
 fn ce_find_call_references(params: &Value) -> Result<Value, ToolResponse> {
-    let function_address = params.get("address").or_else(|| params.get("function_address")).ok_or_else(|| error_response("missing address".to_owned()))?;
+    let function_address = params
+        .get("address")
+        .or_else(|| params.get("function_address"))
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let func_lua = util::lua_scalar_literal(function_address).map_err(error_response)?;
     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(100);
-    let code = format!(r###"
+    let code = format!(
+        r###"
 {}
 local func = {}
 local limit = {}
@@ -925,15 +966,20 @@ if results then
     results.destroy()
 end
 return {{ success = true, function_address = ce_mcp_to_hex(func), count = #callers, callers = callers }}
-"###, LUA_TO_HEX_HELPER, func_lua, limit);
+"###,
+        LUA_TO_HEX_HELPER, func_lua, limit
+    );
     execute_ce_analysis_snippet(&code)
 }
 
 fn ce_dissect_structure(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
     let size = params.get("size").and_then(Value::as_u64).unwrap_or(256);
-    let code = format!(r###"
+    let code = format!(
+        r###"
 {}
 local address = {}
 local size = {}
@@ -954,7 +1000,9 @@ for i = 0, count - 1 do
 end
 struct.destroy()
 return {{ success = true, address = ce_mcp_to_hex(address), size = size, field_count = #elements, fields = elements }}
-"###, LUA_TO_HEX_HELPER, address_lua, size);
+"###,
+        LUA_TO_HEX_HELPER, address_lua, size
+    );
     execute_ce_analysis_snippet(&code)
 }
 fn response_address(value: Option<&Value>) -> Option<usize> {

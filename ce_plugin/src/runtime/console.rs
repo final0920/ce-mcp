@@ -167,11 +167,7 @@ mod imp {
 
     fn open_debug_log(path: Option<&Path>) -> Option<File> {
         let path = path?;
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
+        OpenOptions::new().create(true).append(true).open(path).ok()
     }
 
     fn to_wide(value: &str) -> Vec<u16> {

@@ -518,7 +518,10 @@ fn call_ce_memory_tool(method: &str, params: &Value) -> Result<Value, ToolRespon
         "read_pointer" => ce_read_pointer(params),
         "read_pointer_chain" => ce_read_pointer_chain(params),
         "write_memory" => ce_write_memory(params),
-        other => Err(error_response(format!("unsupported CE memory tool: {}", other))),
+        other => Err(error_response(format!(
+            "unsupported CE memory tool: {}",
+            other
+        ))),
     }
 }
 
@@ -554,7 +557,10 @@ fn ce_read_integer(params: &Value) -> Result<Value, ToolResponse> {
         .get("address")
         .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
-    let integer_type = params.get("type").and_then(Value::as_str).unwrap_or("dword");
+    let integer_type = params
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("dword");
     let type_lua = util::lua_string_literal(integer_type);
     let code = format!(
         r###"{}
@@ -585,8 +591,16 @@ fn ce_read_string(params: &Value) -> Result<Value, ToolResponse> {
         .get("address")
         .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
-    let max_length = params.get("max_length").and_then(Value::as_u64).unwrap_or(256).min(4096);
-    let wide = params.get("wide").and_then(Value::as_bool).unwrap_or(false).to_string();
+    let max_length = params
+        .get("max_length")
+        .and_then(Value::as_u64)
+        .unwrap_or(256)
+        .min(4096);
+    let wide = params
+        .get("wide")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .to_string();
     let code = format!(
         r###"{}
 local address = {}
@@ -616,9 +630,16 @@ return {{ success = true, address = ce_mcp_to_hex(address), value = sanitized, w
 }
 
 fn ce_read_pointer(params: &Value) -> Result<Value, ToolResponse> {
-    let base = params.get("base").or_else(|| params.get("address")).ok_or_else(|| error_response("missing address".to_owned()))?;
+    let base = params
+        .get("base")
+        .or_else(|| params.get("address"))
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let base_lua = util::lua_scalar_literal(base).map_err(error_response)?;
-    let offsets = params.get("offsets").and_then(Value::as_array).cloned().unwrap_or_default();
+    let offsets = params
+        .get("offsets")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let offsets_lua = util::lua_array_literal(&offsets).map_err(error_response)?;
     let code = format!(
         r###"{}
@@ -643,9 +664,15 @@ return {{ success = true, base = ce_mcp_to_hex(base), final_address = ce_mcp_to_
 }
 
 fn ce_read_pointer_chain(params: &Value) -> Result<Value, ToolResponse> {
-    let base = params.get("base").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let base = params
+        .get("base")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let base_lua = util::lua_scalar_literal(base).map_err(error_response)?;
-    let offsets = params.get("offsets").and_then(Value::as_array).cloned().unwrap_or_default();
+    let offsets = params
+        .get("offsets")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let offsets_lua = util::lua_array_literal(&offsets).map_err(error_response)?;
     let code = format!(
         r###"{}

@@ -1,16 +1,16 @@
 ﻿{
   "server": {
     "host": "127.0.0.1",
-    "port": 18765
+    "port": 0
   },
   "auth": {
     "enabled": false,
-    "token": ""
+    "token": "Lope1024"
   },
   "runtime": {
     "dispatch_timeout_ms": 5000,
     "console_log_enabled": true,
-    "debug_enabled": false,
+    "debug_enabled": true,
     "console_title": "流云MCP插件"
   }
 }

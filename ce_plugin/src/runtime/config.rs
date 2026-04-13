@@ -7,14 +7,14 @@ use serde::Deserialize;
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub host: String,
-    pub bind_addr: String,
+    pub port: u16,
+    pub requested_bind_addr: String,
     pub allow_remote: bool,
     pub auth_enabled: bool,
     pub auth_token: Option<String>,
     pub dispatch_timeout_ms: u64,
     pub console_log_enabled: bool,
     pub debug_enabled: bool,
-    pub debug_log_path: Option<PathBuf>,
     pub console_title: String,
     pub server_name: String,
     pub server_version: String,
@@ -52,48 +52,7 @@ struct JsonRuntimeConfig {
 
 impl RuntimeConfig {
     pub fn load() -> Self {
-        let json_config = load_json_config().unwrap_or_default();
-
-        let host = json_config
-            .server
-            .host
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1".to_owned());
-        let port = json_config.server.port.unwrap_or(18765);
-        let allow_remote = !is_loopback_host(host.as_str());
-        let debug_enabled = json_config.runtime.debug_enabled.unwrap_or(false);
-        let debug_log_path = if debug_enabled {
-            resolve_log_path(plugin_base_dir().or_else(executable_base_dir))
-        } else {
-            None
-        };
-
-        Self {
-            host: host.clone(),
-            bind_addr: format_bind_addr(host.as_str(), port),
-            allow_remote,
-            auth_enabled: json_config.auth.enabled.unwrap_or(false),
-            auth_token: json_config
-                .auth
-                .token
-                .clone()
-                .filter(|value| !value.trim().is_empty()),
-            dispatch_timeout_ms: json_config
-                .runtime
-                .dispatch_timeout_ms
-                .filter(|value| *value > 0)
-                .unwrap_or(5_000),
-            console_log_enabled: json_config.runtime.console_log_enabled.unwrap_or(true),
-            debug_enabled,
-            debug_log_path,
-            console_title: json_config
-                .runtime
-                .console_title
-                .clone()
-                .unwrap_or_else(|| "流云MCP插件".to_owned()),
-            server_name: "cheatengine-ce-plugin".to_owned(),
-            server_version: env!("CARGO_PKG_VERSION").to_owned(),
-        }
+        Self::from_json_config(load_json_config().unwrap_or_default())
     }
 
     pub fn validate_startup_policy(&self) -> Result<(), String> {
@@ -109,6 +68,46 @@ impl RuntimeConfig {
 
     pub fn is_public_bind(&self) -> bool {
         is_public_host(self.host.as_str())
+    }
+
+    pub fn uses_auto_port(&self) -> bool {
+        self.port == 0
+    }
+
+    fn from_json_config(json_config: JsonConfig) -> Self {
+        let host = json_config
+            .server
+            .host
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_owned());
+        let port = json_config.server.port.unwrap_or(0);
+
+        Self {
+            host: host.clone(),
+            port,
+            requested_bind_addr: format_bind_addr(host.as_str(), port),
+            allow_remote: !is_loopback_host(host.as_str()),
+            auth_enabled: json_config.auth.enabled.unwrap_or(false),
+            auth_token: json_config
+                .auth
+                .token
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
+            dispatch_timeout_ms: json_config
+                .runtime
+                .dispatch_timeout_ms
+                .filter(|value| *value > 0)
+                .unwrap_or(5_000),
+            console_log_enabled: json_config.runtime.console_log_enabled.unwrap_or(true),
+            debug_enabled: json_config.runtime.debug_enabled.unwrap_or(false),
+            console_title: json_config
+                .runtime
+                .console_title
+                .clone()
+                .unwrap_or_else(|| "流云MCP插件".to_owned()),
+            server_name: "cheatengine-ce-plugin".to_owned(),
+            server_version: env!("CARGO_PKG_VERSION").to_owned(),
+        }
     }
 }
 
@@ -128,11 +127,7 @@ fn resolve_json_config_path() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
-fn resolve_log_path(base_dir: Option<PathBuf>) -> Option<PathBuf> {
-    base_dir.map(|dir| dir.join("ce_plugin.debug.log"))
-}
-
-fn format_bind_addr(host: &str, port: u16) -> String {
+pub(crate) fn format_bind_addr(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{}]:{}", host, port)
     } else {
@@ -174,8 +169,12 @@ fn executable_base_dir() -> Option<PathBuf> {
         .and_then(|path| path.parent().map(Path::to_path_buf))
 }
 
+pub(crate) fn plugin_base_dir() -> Option<PathBuf> {
+    plugin_module_path().and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
 #[cfg(windows)]
-fn plugin_base_dir() -> Option<PathBuf> {
+pub(crate) fn plugin_module_path() -> Option<PathBuf> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
 
@@ -214,10 +213,44 @@ fn plugin_base_dir() -> Option<PathBuf> {
     }
     buffer.truncate(len as usize);
     let path = OsString::from_wide(&buffer);
-    PathBuf::from(path).parent().map(Path::to_path_buf)
+    Some(PathBuf::from(path))
 }
 
 #[cfg(not(windows))]
-fn plugin_base_dir() -> Option<PathBuf> {
+pub(crate) fn plugin_module_path() -> Option<PathBuf> {
     None
+}
+
+pub(crate) fn local_app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JsonConfig, JsonRuntimeConfig, JsonServerConfig, RuntimeConfig};
+
+    #[test]
+    fn defaults_to_auto_port() {
+        let config = RuntimeConfig::from_json_config(JsonConfig::default());
+
+        assert_eq!(config.port, 0);
+        assert_eq!(config.requested_bind_addr, "127.0.0.1:0");
+        assert!(config.uses_auto_port());
+    }
+
+    #[test]
+    fn keeps_explicit_fixed_port() {
+        let config = RuntimeConfig::from_json_config(JsonConfig {
+            server: JsonServerConfig {
+                host: Some("127.0.0.1".to_owned()),
+                port: Some(18765),
+            },
+            auth: Default::default(),
+            runtime: JsonRuntimeConfig::default(),
+        });
+
+        assert_eq!(config.port, 18765);
+        assert_eq!(config.requested_bind_addr, "127.0.0.1:18765");
+        assert!(!config.uses_auto_port());
+    }
 }

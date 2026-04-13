@@ -36,6 +36,10 @@ pub fn bootstrap(plugin_id: i32, bind_addr: &str) -> String {
 
 pub fn health_payload(ctx: &McpContext<'_>) -> String {
     let (
+        instance_id,
+        ce_pid,
+        target_pid,
+        requested_bind_addr,
         dispatcher_mode,
         dispatcher_available,
         dispatch_timeout_ms,
@@ -46,6 +50,10 @@ pub fn health_payload(ctx: &McpContext<'_>) -> String {
     ) = runtime::app_state()
         .map(|app| {
             (
+                app.instance_id().to_owned(),
+                app.ce_process_id(),
+                app.target_process_id(),
+                app.requested_bind_addr().to_owned(),
                 app.dispatcher_mode(),
                 app.dispatcher_available(),
                 app.config().dispatch_timeout_ms,
@@ -55,21 +63,42 @@ pub fn health_payload(ctx: &McpContext<'_>) -> String {
                 app.script_runtime_ready(),
             )
         })
-        .unwrap_or(("uninitialized", false, 0, false, false, false, false));
+        .unwrap_or_else(|| {
+            (
+                "uninitialized".to_owned(),
+                0,
+                0,
+                "unknown".to_owned(),
+                "uninitialized",
+                false,
+                0,
+                false,
+                false,
+                false,
+                false,
+            )
+        });
 
-    format!(
-        "{{\"status\":\"ok\",\"plugin_id\":{},\"bind_addr\":\"{}\",\"transport\":\"http\",\"build_version\":\"{}\",\"dispatcher_mode\":\"{}\",\"dispatcher_available\":{},\"dispatch_timeout_ms\":{},\"console_log_enabled\":{},\"lua_state_export_available\":{},\"auto_assemble_export_available\":{},\"script_runtime_ready\":{},\"supported_ce_versions\":[\"7.5-x64\",\"7.6-x64\"]}}",
-        ctx.plugin_id,
-        ctx.bind_addr,
-        crate::runtime::build_version(),
-        dispatcher_mode,
-        dispatcher_available,
-        dispatch_timeout_ms,
-        console_log_enabled,
-        lua_state_export_available,
-        auto_assemble_export_available,
-        script_runtime_ready
-    )
+    json!({
+        "status": "ok",
+        "instance_id": instance_id,
+        "ce_pid": ce_pid,
+        "target_pid": target_pid,
+        "plugin_id": ctx.plugin_id,
+        "bind_addr": ctx.bind_addr,
+        "requested_bind_addr": requested_bind_addr,
+        "transport": "http",
+        "build_version": crate::runtime::build_version(),
+        "dispatcher_mode": dispatcher_mode,
+        "dispatcher_available": dispatcher_available,
+        "dispatch_timeout_ms": dispatch_timeout_ms,
+        "console_log_enabled": console_log_enabled,
+        "lua_state_export_available": lua_state_export_available,
+        "auto_assemble_export_available": auto_assemble_export_available,
+        "script_runtime_ready": script_runtime_ready,
+        "supported_ce_versions": ["7.5-x64", "7.6-x64"]
+    })
+    .to_string()
 }
 
 pub fn handle_post_mcp(body: &str, ctx: &McpContext<'_>) -> String {
@@ -254,6 +283,10 @@ fn handle_tools_call(params_json: &str) -> ToolResponse {
 
 fn handle_ping(ctx: &McpContext<'_>) -> ToolResponse {
     let (
+        instance_id,
+        ce_pid,
+        target_pid,
+        requested_bind_addr,
         dispatcher_mode,
         dispatcher_available,
         dispatch_timeout_ms,
@@ -264,6 +297,10 @@ fn handle_ping(ctx: &McpContext<'_>) -> ToolResponse {
     ) = runtime::app_state()
         .map(|app| {
             (
+                app.instance_id().to_owned(),
+                app.ce_process_id(),
+                app.target_process_id(),
+                app.requested_bind_addr().to_owned(),
                 app.dispatcher_mode(),
                 app.dispatcher_available(),
                 app.config().dispatch_timeout_ms,
@@ -273,15 +310,33 @@ fn handle_ping(ctx: &McpContext<'_>) -> ToolResponse {
                 app.script_runtime_ready(),
             )
         })
-        .unwrap_or(("uninitialized", false, 0, false, false, false, false));
+        .unwrap_or_else(|| {
+            (
+                "uninitialized".to_owned(),
+                0,
+                0,
+                "unknown".to_owned(),
+                "uninitialized",
+                false,
+                0,
+                false,
+                false,
+                false,
+                false,
+            )
+        });
 
     ToolResponse {
         success: true,
         body_json: json!({
             "success": true,
             "message": "pong",
+            "instance_id": instance_id,
+            "ce_pid": ce_pid,
+            "target_pid": target_pid,
             "plugin_id": ctx.plugin_id,
             "bind_addr": ctx.bind_addr,
+            "requested_bind_addr": requested_bind_addr,
             "transport": "http",
             "build_version": crate::runtime::build_version(),
             "dispatcher_mode": dispatcher_mode,

@@ -85,8 +85,8 @@ ce_plugin/target/release/ce_plugin.dll
 
 ### 3. Connect MCP Client
 
-- Health endpoint: `GET http://127.0.0.1:18765/health`
-- MCP endpoint: `POST http://127.0.0.1:18765/mcp`
+- Single-instance fixed-port mode: set `server.port=18765`, then connect to `GET http://127.0.0.1:18765/health` and `POST http://127.0.0.1:18765/mcp`
+- Multi-instance recommended mode: set `server.port=0`, let the plugin allocate a free port, then read the actual `bind_addr` from the local discovery registry
 
 The exact client config depends on whether the MCP client supports HTTP or Streamable HTTP transport.
 
@@ -97,6 +97,8 @@ The exact client config depends on whether the MCP client supports HTTP or Strea
 - `script_runtime_ready = true` means script-sensitive tools and backend-bootstrap-dependent CE paths are available.
 - If the hook cannot be installed, the plugin may fall back to `serialized-worker`.
 - Fallback mode is a degraded compatibility path, not the preferred long-term backend for migrated CE-first tools.
+- `/health` and `ping` return `instance_id / ce_pid / target_pid / bind_addr / requested_bind_addr` for multi-instance routing and diagnostics.
+- When `runtime.debug_enabled=true`, per-instance debug logs are written as `ce_plugin.<ce_pid>.<instance_id[:8]>.debug.log`.
 
 ## Tool Surface
 
@@ -106,7 +108,7 @@ The tool surface is organized around the normal stages of dynamic reverse engine
 
 Used to establish context before analysis starts.
 
-- `ping`: Health probe for plugin liveness, dispatcher mode, and script runtime state.
+- `ping`: Health probe for plugin liveness, instance identity, bind addresses, dispatcher mode, and script runtime state.
 - `get_process_info`: Returns the currently attached process summary, architecture, and loaded module count.
 - `enum_modules`: Lists loaded modules with base addresses, sizes, and paths.
 - `get_thread_list`: Enumerates target-process threads for runtime inspection.
@@ -215,7 +217,7 @@ Example:
 {
   "server": {
     "host": "127.0.0.1",
-    "port": 18765
+    "port": 0
   },
   "auth": {
     "enabled": false,
@@ -232,7 +234,19 @@ Example:
 
 `0.0.0.0` or public bind targets require `auth.enabled=true` and a non-empty bearer token.
 
-Client-facing integration follows the MCP HTTP endpoint (`/mcp`) and health endpoint (`/health`) described in this README. When `runtime.debug_enabled=true`, the plugin also writes a Chinese debug log file named `ce_plugin.debug.log` beside the DLL for troubleshooting.
+Recommended configuration:
+
+- Single-instance fixed port: set `server.port=18765` or another explicit port and connect directly.
+- Multi-instance automatic ports: set `server.port=0` and let the plugin claim a free local port.
+
+Local discovery registry:
+
+- Directory: `%LOCALAPPDATA%\ce-mcp\instances\`
+- File model: one live `ce-<ce_pid>.json` per active CE process
+- Record fields: `instance_id`, `ce_pid`, `target_pid`, `plugin_id`, `bind_addr`, `requested_bind_addr`, `dll_path`, `debug_log_path`, `server_version`, `last_heartbeat_unix_ms`
+- Lifecycle: register on startup, refresh heartbeat while running, remove on clean shutdown, prune stale entries during startup and heartbeat refresh
+
+Client-facing integration follows the MCP HTTP endpoint (`/mcp`) and health endpoint (`/health`) described in this README. Multi-instance clients should enumerate the discovery registry first, then connect to the instance-specific `bind_addr`.
 
 ## Project Layout
 

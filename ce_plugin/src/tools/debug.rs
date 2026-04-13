@@ -136,7 +136,10 @@ fn call_ce_debug_tool(method: &str, params: &Value) -> Result<Value, ToolRespons
         "start_dbvm_watch" => ce_start_dbvm_watch(params),
         "poll_dbvm_watch" => ce_poll_dbvm_watch(params),
         "stop_dbvm_watch" => ce_stop_dbvm_watch(params),
-        other => Err(error_response(format!("unsupported CE debug tool: {}", other))),
+        other => Err(error_response(format!(
+            "unsupported CE debug tool: {}",
+            other
+        ))),
     }
 }
 
@@ -235,13 +238,27 @@ fn stop_dbvm_watch(params_json: &str) -> ToolResponse {
 }
 
 fn ce_set_breakpoint(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
     let id_lua = util::lua_string_literal(params.get("id").and_then(Value::as_str).unwrap_or(""));
-    let capture_registers = params.get("capture_registers").and_then(Value::as_bool).unwrap_or(true).to_string();
-    let capture_stack = params.get("capture_stack").and_then(Value::as_bool).unwrap_or(false).to_string();
-    let stack_depth = params.get("stack_depth").and_then(Value::as_u64).unwrap_or(16);
-    let code = format!(r###"{}
+    let capture_registers = params
+        .get("capture_registers")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        .to_string();
+    let capture_stack = params
+        .get("capture_stack")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .to_string();
+    let stack_depth = params
+        .get("stack_depth")
+        .and_then(Value::as_u64)
+        .unwrap_or(16);
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local address = {}
 local bp_id = {}
@@ -267,17 +284,27 @@ end)
 _G.__ce_mcp_hw_bp_slots[slot] = {{ id = bp_id, address = address }}
 _G.__ce_mcp_breakpoints[bp_id] = {{ address = address, slot = slot, type = "execute" }}
 return {{ success = true, id = bp_id, address = ce_mcp_to_hex(address), slot = slot, method = "hardware_debug_register" }}
-"###, DEBUG_LUA_HELPER, address_lua, id_lua, capture_registers, capture_stack, stack_depth);
+"###,
+        DEBUG_LUA_HELPER, address_lua, id_lua, capture_registers, capture_stack, stack_depth
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_set_data_breakpoint(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
     let id_lua = util::lua_string_literal(params.get("id").and_then(Value::as_str).unwrap_or(""));
-    let access_type = util::lua_string_literal(params.get("access_type").and_then(Value::as_str).unwrap_or("w"));
+    let access_type = util::lua_string_literal(
+        params
+            .get("access_type")
+            .and_then(Value::as_str)
+            .unwrap_or("w"),
+    );
     let size = params.get("size").and_then(Value::as_u64).unwrap_or(4);
-    let code = format!(r###"{}
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local address = {}
 local bp_id = {}
@@ -303,13 +330,16 @@ end)
 _G.__ce_mcp_hw_bp_slots[slot] = {{ id = bp_id, address = address }}
 _G.__ce_mcp_breakpoints[bp_id] = {{ address = address, slot = slot, type = "data_" .. access_type }}
 return {{ success = true, id = bp_id, address = ce_mcp_to_hex(address), slot = slot, access_type = access_type, size = size, method = "hardware_debug_register" }}
-"###, DEBUG_LUA_HELPER, address_lua, id_lua, access_type, size);
+"###,
+        DEBUG_LUA_HELPER, address_lua, id_lua, access_type, size
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_remove_breakpoint(params: &Value) -> Result<Value, ToolResponse> {
     let id_lua = util::lua_string_literal(params.get("id").and_then(Value::as_str).unwrap_or(""));
-    let code = format!(r###"{}
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local bp_id = {}
 local bp = _G.__ce_mcp_breakpoints[bp_id]
@@ -318,24 +348,30 @@ pcall(function() debug_removeBreakpoint(bp.address) end)
 if bp.slot then _G.__ce_mcp_hw_bp_slots[bp.slot] = nil end
 _G.__ce_mcp_breakpoints[bp_id] = nil
 return {{ success = true, id = bp_id }}
-"###, DEBUG_LUA_HELPER, id_lua);
+"###,
+        DEBUG_LUA_HELPER, id_lua
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_list_breakpoints() -> Result<Value, ToolResponse> {
-    let code = format!(r###"{}
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local list = {{}}
 for id, bp in pairs(_G.__ce_mcp_breakpoints) do
     table.insert(list, {{ id = id, address = ce_mcp_to_hex(bp.address), type = bp.type or "execution", slot = bp.slot }})
 end
 return {{ success = true, count = #list, breakpoints = list }}
-"###, DEBUG_LUA_HELPER);
+"###,
+        DEBUG_LUA_HELPER
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_clear_all_breakpoints() -> Result<Value, ToolResponse> {
-    let code = format!(r###"{}
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local count = 0
 for id, bp in pairs(_G.__ce_mcp_breakpoints) do
@@ -346,14 +382,24 @@ _G.__ce_mcp_breakpoints = {{}}
 _G.__ce_mcp_breakpoint_hits = {{}}
 _G.__ce_mcp_hw_bp_slots = {{}}
 return {{ success = true, removed = count }}
-"###, DEBUG_LUA_HELPER);
+"###,
+        DEBUG_LUA_HELPER
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_get_breakpoint_hits(params: &Value) -> Result<Value, ToolResponse> {
-    let id_lua = match params.get("id") { Some(value) => util::lua_scalar_literal(value).map_err(error_response)?, None => "nil".to_owned() };
-    let clear = params.get("clear").and_then(Value::as_bool).unwrap_or(true).to_string();
-    let code = format!(r###"{}
+    let id_lua = match params.get("id") {
+        Some(value) => util::lua_scalar_literal(value).map_err(error_response)?,
+        None => "nil".to_owned(),
+    };
+    let clear = params
+        .get("clear")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        .to_string();
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local bp_id = {}
 local clear = {}
@@ -369,14 +415,19 @@ else
     if clear then _G.__ce_mcp_breakpoint_hits = {{}} end
 end
 return {{ success = true, count = #hits, hits = hits }}
-"###, DEBUG_LUA_HELPER, id_lua, clear);
+"###,
+        DEBUG_LUA_HELPER, id_lua, clear
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_get_physical_address(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
-    let code = format!(r###"{}
+    let code = format!(
+        r###"{}
 local address = {}
 if type(address) == "string" then address = getAddressSafe(address) end
 if not address then return {{ success = false, error = "Invalid address" }} end
@@ -384,16 +435,24 @@ local ok, phys = pcall(dbk_getPhysicalAddress, address)
 if not ok then return {{ success = false, virtual_address = ce_mcp_to_hex(address), error = "DBK driver not loaded. Run dbk_initialize() first or load it via CE settings." }} end
 if not phys or phys == 0 then return {{ success = false, virtual_address = ce_mcp_to_hex(address), error = "Could not resolve physical address. Page may not be present in RAM." }} end
 return {{ success = true, virtual_address = ce_mcp_to_hex(address), physical_address = ce_mcp_to_hex(phys), physical_int = phys }}
-"###, DEBUG_LUA_HELPER, address_lua);
+"###,
+        DEBUG_LUA_HELPER, address_lua
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_start_dbvm_watch(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
     let mode = util::lua_string_literal(params.get("mode").and_then(Value::as_str).unwrap_or("w"));
-    let max_entries = params.get("max_entries").and_then(Value::as_u64).unwrap_or(1000);
-    let code = format!(r###"{}
+    let max_entries = params
+        .get("max_entries")
+        .and_then(Value::as_u64)
+        .unwrap_or(1000);
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local address = {}
 local mode = {}
@@ -418,15 +477,23 @@ if not ok_watch then return {{ success = false, virtual_address = ce_mcp_to_hex(
 if not watch_id then return {{ success = false, virtual_address = ce_mcp_to_hex(address), physical_address = ce_mcp_to_hex(phys), error = "DBVM watch returned nil (check CE console for details)" }} end
 _G.__ce_mcp_active_watches[watch_key] = {{ id = watch_id, physical = phys, mode = mode, start_time = os.time() }}
 return {{ success = true, status = "monitoring", virtual_address = ce_mcp_to_hex(address), physical_address = ce_mcp_to_hex(phys), watch_id = watch_id, mode = mode, note = "Call poll_dbvm_watch to get logs without stopping, or stop_dbvm_watch to end" }}
-"###, DEBUG_LUA_HELPER, address_lua, mode, max_entries);
+"###,
+        DEBUG_LUA_HELPER, address_lua, mode, max_entries
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_poll_dbvm_watch(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
-    let max_results = params.get("max_results").and_then(Value::as_u64).unwrap_or(1000);
-    let code = format!(r###"{}
+    let max_results = params
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(1000);
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local address = {}
 local max_results = {}
@@ -446,15 +513,23 @@ if ok_log and log then
 end
 local uptime = os.time() - (watch_info.start_time or os.time())
 return {{ success = true, status = "active", virtual_address = ce_mcp_to_hex(address), physical_address = ce_mcp_to_hex(watch_info.physical), mode = watch_info.mode, uptime_seconds = uptime, hit_count = #results, hits = results, note = "Watch still active. Call again to get more logs, or stop_dbvm_watch to end." }}
-"###, DEBUG_LUA_HELPER, address_lua, max_results);
+"###,
+        DEBUG_LUA_HELPER, address_lua, max_results
+    );
     execute_ce_debug_snippet(&code)
 }
 
 fn ce_stop_dbvm_watch(params: &Value) -> Result<Value, ToolResponse> {
-    let address = params.get("address").ok_or_else(|| error_response("missing address".to_owned()))?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| error_response("missing address".to_owned()))?;
     let address_lua = util::lua_scalar_literal(address).map_err(error_response)?;
-    let max_results = params.get("max_results").and_then(Value::as_u64).unwrap_or(1000);
-    let code = format!(r###"{}
+    let max_results = params
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(1000);
+    let code = format!(
+        r###"{}
 ce_mcp_debug_init()
 local address = {}
 local max_results = {}
@@ -476,7 +551,9 @@ pcall(dbvm_watch_disable, watch_info.id)
 _G.__ce_mcp_active_watches[watch_key] = nil
 local uptime = os.time() - (watch_info.start_time or os.time())
 return {{ success = true, status = "stopped", virtual_address = ce_mcp_to_hex(address), physical_address = ce_mcp_to_hex(watch_info.physical), mode = watch_info.mode, uptime_seconds = uptime, hit_count = #results, hits = results }}
-"###, DEBUG_LUA_HELPER, address_lua, max_results);
+"###,
+        DEBUG_LUA_HELPER, address_lua, max_results
+    );
     execute_ce_debug_snippet(&code)
 }
 fn current_modules() -> Vec<runtime::ModuleInfo> {
